@@ -1,9 +1,9 @@
 import { ContextFrame } from "../context/frame.js";
 import type { ContextEntry } from "../context/key.js";
+import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
 import { combinedError } from "../lifecycle/errors.js";
 import { runWith } from "./state.js";
-import { activeScope } from "../di/active-scope.js";
 import type { RuntimeState } from "./state.js";
 import { TaskGroup } from "./task-group.js";
 
@@ -87,8 +87,7 @@ export async function execute<T>(
 
   try {
     executionSignal.throwIfAborted();
-    // A new execution owns its resolution: the scope that started it, whether
-    // constructing, starting, or closing, stops being ambient here.
+    // This execution resolves in its own scope, not in the one that started it.
     result = await activeScope.exit(() => runWith(state, async () => handler()));
     executionSignal.throwIfAborted();
   } catch (error) {
