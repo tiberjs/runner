@@ -11,10 +11,10 @@ import type { TaskGroup } from "./task-group.js";
  * transport-specific data.
  */
 export interface RuntimeState {
-  context: ExecutionContext;
-  tasks: TaskGroup;
-  scope: Scope;
-  attachment: unknown;
+  readonly context: ExecutionContext;
+  readonly tasks: TaskGroup;
+  readonly scope: Scope;
+  readonly attachment: unknown;
 }
 
 const storage = new AsyncLocalStorage<RuntimeState>();

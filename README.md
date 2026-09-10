@@ -133,7 +133,13 @@ await execute(
 );
 ```
 
-`withContext()` derives an immutable child frame for one synchronous or asynchronous call chain. A derived binding shadows its parent without modifying it, so concurrent children remain isolated.
+`withContext()` derives an immutable child frame for one synchronous or asynchronous call chain. A derived binding shadows its parent without modifying it, so concurrent children remain isolated. Each non-empty derivation creates a frame and ambient runtime state; lookup walks from the newest frame toward the root. Keep nesting bounded on hot paths. An empty binding list is a no-op.
+
+Frame immutability covers binding identity and shadowing, not deep immutability of bound values. Values are stored by reference and are not cloned or frozen. Prefer execution-scoped metadata such as tenant, request, trace, or transaction identity; put services and owned resources in `Scope` rather than using context as a service locator.
+
+`use()` returns `undefined` both when no binding exists and when a key is explicitly bound to `undefined`. This is intentional. Encode a distinct sentinel in the value type when three-state semantics are required. Framework code that must inspect binding presence can use `ContextFrame.has()`.
+
+As with every `AsyncLocalStorage` context, asynchronous work created inside `withContext()` retains the derived state until that work settles, even if the handler has returned. Await or return such work, or start owned concurrent work with `fork()` so its `TaskGroup` cancels and joins it at the execution boundary.
 
 Framework code that needs to retain or compose frames directly can use `ContextFrame.from(entries)`, `frame.withEntries(entries)`, and the lower-level `ContextFrame.with(record)` API. `provide()` returns a `ContextEntry`; it does not mutate the active context.
 

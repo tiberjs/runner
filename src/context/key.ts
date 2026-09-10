@@ -10,7 +10,7 @@ export interface ContextKey<T> {
 export type ContextEntry = readonly [ContextKey<unknown>, unknown];
 
 export function contextKey<T>(description: string): ContextKey<T> {
-  return { id: Symbol(description), description };
+  return Object.freeze({ id: Symbol(description), description });
 }
 
 /** Create a downstream binding for `key`. */
