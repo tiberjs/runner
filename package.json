@@ -1,0 +1,49 @@
+{
+  "name": "@tiberjs/runner",
+  "version": "0.1.0",
+  "description": "Transport-independent execution runtime: immutable context, structured concurrency, dependency injection, and application lifecycle.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/build-package.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix --deny-warnings .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@12.3.4",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tiberjs/runner.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
+    "typescript": "^5",
+    "vitest": "^5.0.0"
+  }
+}
