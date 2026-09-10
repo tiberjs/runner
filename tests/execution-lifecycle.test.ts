@@ -1,5 +1,14 @@
 import { expect, afterEach, test, vi } from "vitest";
-import { execute, fork, forkGroup, onDispose, signal, timeout, deadline } from "../src/index.js";
+import {
+  currentAttachment,
+  deadline,
+  execute,
+  fork,
+  forkGroup,
+  onDispose,
+  signal,
+  timeout,
+} from "../src/index.js";
 
 const seed = () => ({ signal: new AbortController().signal, attachment: undefined });
 afterEach(() => vi.useRealTimers());
@@ -13,6 +22,22 @@ function untilAbort(): Promise<void> {
 
   return promise;
 }
+
+test("handler-only executions receive isolated signal and attachment defaults", async () => {
+  let first!: AbortSignal;
+  let second!: AbortSignal;
+
+  await execute(() => {
+    first = signal();
+    expect(first.aborted).toBe(false);
+    expect(currentAttachment()).toBeUndefined();
+  });
+  await execute(() => {
+    second = signal();
+  });
+
+  expect(second).not.toBe(first);
+});
 
 test("synchronous fork failures preserve the original error at the boundary", async () => {
   const error = new Error("sync failure");

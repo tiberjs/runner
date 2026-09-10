@@ -1,3 +1,14 @@
+import type { ContextEntry } from "./key.js";
+
+function entryMap(entries: readonly ContextEntry[]): Map<PropertyKey, unknown> {
+  const values = new Map<PropertyKey, unknown>();
+  for (const [key, value] of entries) {
+    values.set(key.id, value);
+  }
+
+  return values;
+}
+
 /**
  * An immutable chain of execution-context bindings.
  *
@@ -12,6 +23,11 @@ export class ContextFrame {
 
   /** The empty root frame shared by new executions. */
   static readonly empty: ContextFrame = new ContextFrame(null, new Map());
+
+  /** Create a root frame containing the supplied context bindings. */
+  static from(entries: readonly ContextEntry[]): ContextFrame {
+    return entries.length === 0 ? ContextFrame.empty : new ContextFrame(null, entryMap(entries));
+  }
 
   get(key: PropertyKey): unknown {
     // oxlint-disable-next-line typescript/no-this-alias -- The cursor walks this frame's parent chain without copying it.
@@ -43,6 +59,11 @@ export class ContextFrame {
     }
 
     return new ContextFrame(this, own);
+  }
+
+  /** Return a child frame containing the supplied context bindings. */
+  withEntries(entries: readonly ContextEntry[]): ContextFrame {
+    return entries.length === 0 ? this : new ContextFrame(this, entryMap(entries));
   }
 
   keys(): IterableIterator<PropertyKey> {

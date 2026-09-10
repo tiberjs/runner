@@ -1,4 +1,5 @@
 import { ContextFrame } from "../context/frame.js";
+import type { ContextEntry } from "../context/key.js";
 import { Scope } from "../di/scope.js";
 import { combinedError } from "../lifecycle/errors.js";
 import { runWith } from "./state.js";
@@ -12,15 +13,26 @@ import { TaskGroup } from "./task-group.js";
  * scope remains owned by the caller.
  */
 export interface ExecutionSeed {
-  readonly signal: AbortSignal;
-  readonly attachment: unknown;
+  /** Defaults to a fresh, non-aborted signal. */
+  readonly signal?: AbortSignal;
+  /** Opaque transport data; defaults to undefined. */
+  readonly attachment?: unknown;
   readonly scope?: Scope;
-  readonly values?: ContextFrame;
+  /** A prepared frame or bindings materialized into a root frame. */
+  readonly values?: ContextFrame | readonly ContextEntry[];
   readonly deadline?: number;
 }
 
 /** Reason used to close a TaskGroup after its execution completes normally. */
 export const COMPLETED = new DOMException("Execution completed", "AbortError");
+
+function materializeValues(values: ExecutionSeed["values"]): ContextFrame {
+  if (values === undefined) {
+    return ContextFrame.empty;
+  }
+
+  return values instanceof ContextFrame ? values : ContextFrame.from(values);
+}
 
 /**
  * Create runtime state without running or closing it.
@@ -31,8 +43,8 @@ export const COMPLETED = new DOMException("Execution completed", "AbortError");
 export function begin(seed: ExecutionSeed): RuntimeState {
   return {
     context: {
-      values: seed.values ?? ContextFrame.empty,
-      signal: seed.signal,
+      values: materializeValues(seed.values),
+      signal: seed.signal ?? new AbortController().signal,
       deadline: seed.deadline,
     },
     tasks: new TaskGroup(),
@@ -41,20 +53,35 @@ export function begin(seed: ExecutionSeed): RuntimeState {
   };
 }
 
+type ExecutionHandler<T> = () => T | Promise<T>;
+
 /**
  * Run a managed execution, then cancel and join its tasks. Unobserved task
- * failures are surfaced, and a scope created by this call is disposed.
+ * failures are surfaced, and a scope created by this call is disposed. Pass a
+ * handler directly to use the default signal and attachment.
  */
-export async function execute<T>(seed: ExecutionSeed, handler: () => T | Promise<T>): Promise<T> {
+export function execute<T>(handler: ExecutionHandler<T>): Promise<T>;
+export function execute<T>(seed: ExecutionSeed, handler: ExecutionHandler<T>): Promise<T>;
+export async function execute<T>(
+  seedOrHandler: ExecutionSeed | ExecutionHandler<T>,
+  suppliedHandler?: ExecutionHandler<T>,
+): Promise<T> {
+  const handler = typeof seedOrHandler === "function" ? seedOrHandler : suppliedHandler;
+  if (typeof handler !== "function") {
+    throw new TypeError("execute() requires a handler.");
+  }
+
+  const seed = typeof seedOrHandler === "function" ? {} : seedOrHandler;
   const state = begin(seed);
+  const executionSignal = state.context.signal;
   const ownsScope = seed.scope === undefined;
   let errors: unknown[] | undefined;
   let result!: T;
 
   try {
-    seed.signal.throwIfAborted();
+    executionSignal.throwIfAborted();
     result = await runWith(state, async () => handler());
-    seed.signal.throwIfAborted();
+    executionSignal.throwIfAborted();
   } catch (error) {
     (errors ??= []).push(error);
   }
