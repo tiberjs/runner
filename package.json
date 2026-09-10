@@ -33,6 +33,7 @@
     "type": "git",
     "url": "git+https://github.com/tiberjs/runner.git"
   },
+  "author": "miinhho",
   "publishConfig": {
     "access": "public"
   },
