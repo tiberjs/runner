@@ -47,9 +47,12 @@ ESM uses `NodeNext`; relative imports include `.js`. Do not add a second formatt
 ## Publishing
 
 The `Publish` workflow runs only from `main`, rebuilds and retests the package,
-then publishes with npm provenance. Configure the protected `npm` GitHub
-environment and a granular `NPM_TOKEN` repository secret before the first run.
-Bump `package.json` before dispatching; publishing an existing version must fail.
+then authenticates through npm trusted publishing with GitHub OIDC. It has
+`id-token: write` and must not receive `NPM_TOKEN` or `NODE_AUTH_TOKEN`. After the
+bootstrap release creates the package, register repository `tiberjs/runner`,
+workflow `publish.yml`, and GitHub environment `npm` as the package's trusted
+publisher. Bump `package.json` before dispatching; publishing an existing version
+must fail.
 
 ## Implementation rules
 
