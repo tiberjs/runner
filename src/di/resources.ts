@@ -1,5 +1,5 @@
 import { combinedError } from "../lifecycle/errors.js";
-import { activeScope } from "./ambient.js";
+import { activeScope } from "./active-scope.js";
 import { ScopeClosedError, ScopeDisposalConflictError, ScopeStartupError } from "./errors.js";
 import type { Scope } from "./scope.js";
 

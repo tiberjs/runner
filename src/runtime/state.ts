@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { activeScope } from "../di/active-scope.js";
 import type { ExecutionContext } from "../context/execution-context.js";
 import type { Scope } from "../di/scope.js";
 import type { TaskGroup } from "./task-group.js";
@@ -19,8 +20,9 @@ export interface RuntimeState {
 
 const storage = new AsyncLocalStorage<RuntimeState>();
 
+/** A constructing or closing scope never carries into the entered execution. */
 export function runWith<T>(state: RuntimeState, fn: () => T): T {
-  return storage.run(state, fn);
+  return activeScope.exit(() => storage.run(state, fn));
 }
 
 export function currentState(): RuntimeState {

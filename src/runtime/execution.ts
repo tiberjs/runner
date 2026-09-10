@@ -17,6 +17,12 @@ export interface ExecutionSeed {
   readonly signal?: AbortSignal;
   /** Opaque transport data; defaults to undefined. */
   readonly attachment?: unknown;
+  /**
+   * Resource owner and dependency root for this execution.
+   *
+   * An omitted scope is a disjoint root: application providers are unreachable
+   * and an unregistered class token is constructed locally instead of shared.
+   */
   readonly scope?: Scope;
   /** A prepared frame or bindings materialized into a root frame. */
   readonly values?: ContextFrame | readonly ContextEntry[];

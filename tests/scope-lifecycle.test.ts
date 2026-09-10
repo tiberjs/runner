@@ -1,6 +1,7 @@
 import { expect, describe, test } from "vitest";
 import {
   ApplicationLifecycle,
+  currentScope,
   execute,
   inject,
   onDispose,
@@ -781,5 +782,44 @@ describe("Scope lifecycle", () => {
     ).toThrow(ScopeClosedError);
     await closing;
     expect(events).toEqual(["close"]);
+  });
+
+  test("an execution started during startup resolves its own scope, not the constructing one", async () => {
+    await using app = new ApplicationLifecycle();
+    const Config = token<string>("config");
+    app.scope.provide(Config, () => "app");
+    const requestScope = app.scope.child();
+    const events: string[] = [];
+    let executionScope: unknown;
+
+    class Boot {
+      constructor() {
+        onStart(async () => {
+          await execute(
+            {
+              scope: requestScope,
+              signal: new AbortController().signal,
+              attachment: undefined,
+            },
+            async () => {
+              executionScope = currentScope();
+              events.push(`resolved:${inject(Config)}`);
+              onDispose(() => {
+                events.push("execution:cleanup");
+              });
+            },
+          );
+          events.push("startup:done");
+        });
+      }
+    }
+    app.scope.get(Boot);
+    await app.start();
+
+    expect(executionScope).toBe(requestScope);
+    expect(events).toEqual(["resolved:app", "startup:done"]);
+
+    await requestScope[Symbol.asyncDispose]();
+    expect(events).toEqual(["resolved:app", "startup:done", "execution:cleanup"]);
   });
 });
