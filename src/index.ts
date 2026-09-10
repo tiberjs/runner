@@ -29,7 +29,7 @@ export { begin, COMPLETED, execute } from "./runtime/execution.js";
 export type { ExecutionSeed } from "./runtime/execution.js";
 export { currentAttachment, currentState, peekState, runWith } from "./runtime/state.js";
 export type { RuntimeState } from "./runtime/state.js";
-export { use } from "./runtime/context.js";
+export { use, withContext } from "./runtime/context.js";
 
 export { fork, forkGroup } from "./runtime/fork.js";
 export { deadline, signal, timeout } from "./runtime/timeout.js";

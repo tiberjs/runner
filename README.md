@@ -27,7 +27,7 @@ npm install @tiberjs/runner
 Use `execute()` when one callback defines the complete lifetime of an operation. Runner creates a task group, establishes ambient state, rejects cancelled work, joins child tasks, and disposes the execution scope before the returned promise settles.
 
 ```ts
-import { ContextFrame, contextKey, execute, forkGroup, onDispose, use } from "@tiberjs/runner";
+import { contextKey, execute, forkGroup, onDispose, provide, use } from "@tiberjs/runner";
 
 const RunId = contextKey<string>("run.id");
 const controller = new AbortController();
@@ -36,7 +36,7 @@ const result = await execute(
   {
     signal: controller.signal,
     attachment: { source: "example" },
-    values: ContextFrame.empty.with({ [RunId.id]: "run-42" }),
+    values: [provide(RunId, "run-42")],
   },
   async () => {
     onDispose(() => {
@@ -59,6 +59,8 @@ const result = await execute(
 
 A scope supplied through `ExecutionSeed.scope` remains owned by the caller. If the seed omits a scope, `execute()` creates and disposes one automatically.
 
+`execute(handler)` uses a fresh, non-aborted signal and an `undefined` attachment. Use `execute(options, handler)` when supplying context values, an external cancellation signal, an attachment, a deadline, or a scope.
+
 Use `begin()` with `runWith()` when the caller needs to control the execution lifetime manually. The caller owns the returned `RuntimeState`, including its task group and scope, and must close both.
 
 ## Structured concurrency
@@ -68,7 +70,7 @@ Use `begin()` with `runWith()` when the caller needs to control the execution li
 ```ts
 import { execute, fork, signal } from "@tiberjs/runner";
 
-await execute({ signal: new AbortController().signal, attachment: undefined }, async () => {
+await execute(async () => {
   const task = fork(async () => {
     signal().throwIfAborted();
     return "done";
@@ -107,21 +109,33 @@ const value = await timeout(1_000, async () => {
 
 ## Execution context
 
-Create typed identities with `contextKey()`, bind values with `provide()`, and read them with `use()`.
+Create typed identities with `contextKey()`, bind values with `provide()`, and read them with `use()`. `execute()` accepts bindings directly, so application code does not need to construct a frame.
 
 ```ts
-import { ContextFrame, contextKey, execute, provide, use } from "@tiberjs/runner";
+import { contextKey, execute, provide, use, withContext } from "@tiberjs/runner";
 
 const Tenant = contextKey<string>("tenant");
-const [key, value] = provide(Tenant, "acme");
-const values = ContextFrame.empty.with({ [key.id]: value });
 
-await execute({ signal: new AbortController().signal, attachment: undefined, values }, () => {
-  console.log(use(Tenant)); // "acme"
-});
+await execute(
+  {
+    values: [provide(Tenant, "acme")],
+  },
+  async () => {
+    console.log(use(Tenant)); // "acme"
+
+    await withContext([provide(Tenant, "internal")], async () => {
+      await Promise.resolve();
+      console.log(use(Tenant)); // "internal"
+    });
+
+    console.log(use(Tenant)); // "acme"
+  },
+);
 ```
 
-`ContextFrame` is immutable. A derived frame shadows matching keys without modifying its parent, so sibling executions can share inherited context safely. `provide()` returns a `ContextEntry`; applying entries to downstream state is the responsibility of the calling execution pipeline.
+`withContext()` derives an immutable child frame for one synchronous or asynchronous call chain. A derived binding shadows its parent without modifying it, so concurrent children remain isolated.
+
+Framework code that needs to retain or compose frames directly can use `ContextFrame.from(entries)`, `frame.withEntries(entries)`, and the lower-level `ContextFrame.with(record)` API. `provide()` returns a `ContextEntry`; it does not mutate the active context.
 
 ## Dependency injection and resources
 
@@ -242,7 +256,7 @@ await execute(
 | Area             | Exports                                                                         |
 | ---------------- | ------------------------------------------------------------------------------- |
 | Execution        | `execute`, `begin`, `runWith`, `currentState`, `peekState`, `currentAttachment` |
-| Context          | `ContextFrame`, `contextKey`, `provide`, `use`                                  |
+| Context          | `contextKey`, `provide`, `use`, `withContext`, `ContextFrame`                   |
 | Concurrency      | `Task`, `TaskGroup`, `fork`, `forkGroup`                                        |
 | Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`                             |
 | DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`    |
