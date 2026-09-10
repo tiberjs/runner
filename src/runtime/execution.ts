@@ -6,12 +6,10 @@ import type { RuntimeState } from "./state.js";
 import { TaskGroup } from "./task-group.js";
 
 /**
- * The transport-agnostic seed for a managed execution (architecture §3, §7). A
- * binding supplies the cancellation `signal` (e.g. client disconnect), the
- * transport `attachment`, and optionally the resource {@link Scope} the
- * execution runs in. Omitting `scope` creates a throwaway one, disposed when
- * the execution ends; passing one (a connection/request scope) leaves its
- * lifetime to the caller.
+ * Inputs supplied by a transport when starting an execution.
+ *
+ * `execute` owns an omitted scope and disposes it at completion. A supplied
+ * scope remains owned by the caller.
  */
 export interface ExecutionSeed {
   readonly signal: AbortSignal;
@@ -25,10 +23,10 @@ export interface ExecutionSeed {
 export const COMPLETED = new DOMException("Execution completed", "AbortError");
 
 /**
- * Build a root {@link RuntimeState} for an execution (architecture §7). The
- * caller runs handlers under it (via {@link runWith}) and decides when to close
- * the TaskGroup — some bindings keep tasks alive past the initial handler
- * return (HTTP SSE, a WS connection).
+ * Create runtime state without running or closing it.
+ *
+ * Transport bindings use this when the execution must remain alive after the
+ * initial handler returns, such as while streaming a response.
  */
 export function begin(seed: ExecutionSeed): RuntimeState {
   return {
@@ -44,10 +42,8 @@ export function begin(seed: ExecutionSeed): RuntimeState {
 }
 
 /**
- * Run `handler` as a fully managed execution (architecture §7, §10): a fresh
- * TaskGroup rooted at `seed.signal`, closed (cancel → join) when the handler
- * settles, with an un-awaited fork failure surfaced. A scope created here (none
- * passed) is disposed too; a caller-owned scope is left intact.
+ * Run a managed execution, then cancel and join its tasks. Unobserved task
+ * failures are surfaced, and a scope created by this call is disposed.
  */
 export async function execute<T>(seed: ExecutionSeed, handler: () => T | Promise<T>): Promise<T> {
   const state = begin(seed);

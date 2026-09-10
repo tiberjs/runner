@@ -39,14 +39,3 @@ export { defer } from "./runtime/defer.js";
 
 export { setTracer, span } from "./runtime/span.js";
 export type { Tracer, TraceSpan } from "./runtime/span.js";
-export { Timeout } from "./decorators/timeout.js";
-export { Span } from "./decorators/span.js";
-
-export { issueToJson, validate, ValidationError } from "./validation/schema.js";
-export type {
-  InferOutput,
-  StandardIssue,
-  StandardSchemaV1,
-  ValidatedInput,
-  ValidationSpec,
-} from "./validation/schema.js";

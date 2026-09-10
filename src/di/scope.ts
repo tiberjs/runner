@@ -9,9 +9,10 @@ export interface ScopeOptions {
 }
 
 /**
- * Hierarchical DI ownership: local providers and resources, ancestor singletons.
- * Resources belong to scopes; concurrent work belongs to execution TaskGroups.
- * Storage, lifecycle bookkeeping, and graph tracking are allocated on first use.
+ * A hierarchical dependency container and resource owner.
+ *
+ * Child scopes resolve ancestor providers while retaining ownership of their
+ * own resources.
  */
 export class Scope {
   readonly #parent: Scope | undefined;

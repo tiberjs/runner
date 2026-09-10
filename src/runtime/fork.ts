@@ -5,13 +5,10 @@ import type { RuntimeState } from "./state.js";
 import { Task, TaskGroup } from "./task-group.js";
 
 /**
- * Start managed concurrent work within the current TaskGroup (architecture §7,
- * §10). The forked task:
- *   - captures the current ExecutionContext (values, deadline),
- *   - runs under a child AbortSignal derived from the parent,
- *   - is owned by the current TaskGroup, which cancels + joins it on close.
+ * Start child work owned by the current execution.
  *
- * The returned {@link Task} is awaitable and independently cancellable.
+ * The child inherits context values and deadline, receives its own cancellation
+ * signal, and is cancelled and joined when the current task group closes.
  */
 export function fork<T>(fn: () => T | Promise<T>): Task<T> {
   const state = currentState();
@@ -61,17 +58,10 @@ const GROUP_FAILED = new DOMException(
 );
 
 /**
- * Run several tasks as one all-or-nothing scope (architecture §7) — a `Promise.all`
- * that also cancels the losers. Each thunk is forked into a fresh child
- * TaskGroup (a nursery). If any fails, cancel and join all siblings before
- * surfacing every genuine failure, including failures from sibling finalizers.
- * Resolves to a positional tuple of results.
+ * Run tasks as one all-or-nothing group.
  *
- * @example
- * const [profile, orders] = await forkGroup(
- *   () => loadProfile(id),
- *   () => orders.mine(),
- * );
+ * A failure cancels and joins every sibling before all genuine failures are
+ * surfaced. Successful results preserve the input order.
  */
 export async function forkGroup<T extends readonly unknown[]>(
   ...thunks: ForkThunks<T>

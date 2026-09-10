@@ -1,6 +1,6 @@
 # Working on @tiberjs/runner
 
-`@tiberjs/runner` is the transport-independent execution runtime for TiberJS. It owns immutable execution context, structured tasks, dependency injection, application lifecycle, events, validation primitives, and generic tracing.
+`@tiberjs/runner` is the transport-independent execution runtime for TiberJS. It owns immutable execution context, structured tasks, dependency injection, application lifecycle, events, and tracing.
 
 ## Repository boundary
 
@@ -9,8 +9,6 @@
 - `src/di/`: scopes, tokens, ambient injection, resource startup/disposal, and resolution graphs.
 - `src/events/`: application events and the event bus.
 - `src/lifecycle/`: application startup, drain, and shutdown ownership.
-- `src/validation/`: transport-independent Standard Schema contracts.
-- `src/decorators/`: execution decorators only.
 - `tests/`: public behavior and lifecycle boundary tests.
 
 Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or optional feature packages. Do not introduce transport messages, routes, requests, responses, sockets, status codes, or broker acknowledgements here. `reflect-metadata` is not a runner dependency.
@@ -23,7 +21,6 @@ Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or opti
 - `ApplicationLifecycle` owns its scope, event bus, startup, drain callbacks, and close sequence.
 - Context is immutable. Derive it with `provide(...)`; never introduce a mutable request-style bag.
 - Cancellation and deadlines are live state. Recheck them after awaits and before commitment points.
-- Validation delegates to Standard Schema. Do not build a runner-specific validator.
 - Preserve native error identity and `cause`; use `AggregateError` when independent operation and cleanup failures both matter.
 
 ## Toolchain
@@ -38,11 +35,11 @@ Use Node 24 and the pnpm version pinned in `package.json`. Run commands from the
 | `pnpm format:check`              | Check formatting                  |
 | `pnpm typecheck`                 | Typecheck source and tests        |
 | `pnpm check`                     | Lint, format check, and typecheck |
-| `pnpm build`                     | Clean and compile `dist`          |
+| `pnpm build`                     | Bundle ESM and emit declarations  |
 | `pnpm test`                      | Run the runner suite              |
 | `pnpm pack`                      | Verify the publish artifact       |
 
-ESM uses `NodeNext`; relative imports include `.js`. Do not add a second formatter or linter configuration. Import sorting stays disabled because side-effect ordering can be significant.
+The public package is an ESM bundle built by Rspack; TypeScript emits declarations after bundling. Relative source imports include `.js` for NodeNext resolution. Do not add a second formatter or linter configuration. Import sorting stays disabled because side-effect ordering can be significant.
 
 ## Publishing
 

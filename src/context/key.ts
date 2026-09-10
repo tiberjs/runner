@@ -1,9 +1,4 @@
-/**
- * A typed key for a request-scoped context value (architecture §4, §5). Mirrors
- * the DI `token()`/`inject()` pair, but for per-request execution context:
- * written by middleware via `provide(key, value)` + `next(...)`, read anywhere
- * in the execution via `use(key)`.
- */
+/** A typed identity for a value carried by an execution context. */
 export interface ContextKey<T> {
   readonly id: symbol;
   readonly description: string;
@@ -11,14 +6,14 @@ export interface ContextKey<T> {
   readonly _type?: T;
 }
 
-/** A `[key, value]` pair passed to `next(...)` to derive downstream context. */
+/** A context binding used to derive a downstream execution. */
 export type ContextEntry = readonly [ContextKey<unknown>, unknown];
 
 export function contextKey<T>(description: string): ContextKey<T> {
   return { id: Symbol(description), description };
 }
 
-/** Bind a value to a context key for the downstream execution. */
+/** Create a downstream binding for `key`. */
 export function provide<T>(key: ContextKey<T>, value: T): ContextEntry {
   return [key, value];
 }

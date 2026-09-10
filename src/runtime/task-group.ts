@@ -65,18 +65,14 @@ export class Task<T> implements PromiseLike<T> {
 }
 
 /**
- * Owns the lifecycle of the concurrent tasks belonging to an execution
- * (architecture §7). On close the group cancels remaining tasks, then joins
- * them: `cancel → join → finish`.
+ * Owns concurrent tasks until an execution boundary closes.
  *
- * Structured concurrency guarantee: a genuine failure from a task that nobody
- * awaited is not silently swallowed — it is surfaced at the scope boundary
- * (request → 500, timeout → throw). Awaited tasks are plain promises: their
- * failure belongs to the awaiter and never re-surfaces here.
+ * Closing cancels and joins active tasks. A failure from a task that was never
+ * awaited is surfaced at the boundary; an awaited task leaves error handling to
+ * its awaiter.
  */
 export class TaskGroup {
-  // Lazily allocated: a request that never forks pays only for this object,
-  // not a Set + array. `fork()` is uncommon relative to total requests.
+  // Avoid allocating task bookkeeping for executions that never fork.
   private tasks: Set<Task<unknown>> | null = null;
   private failures: Array<{
     readonly task: Task<unknown>;

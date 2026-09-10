@@ -6,12 +6,10 @@ import type { RuntimeState } from "./state.js";
 import { TaskGroup } from "./task-group.js";
 
 /**
- * Run `fn` under a derived context with a child AbortSignal and a deadline
- * (architecture §8, §10). If `fn` does not settle within `ms`, its signal is
- * aborted with a `TimeoutError`. Parent cancellation still propagates in.
+ * Run `fn` with a child cancellation signal and deadline.
  *
- * A fresh child TaskGroup is created for the scope and closed (cancel → join)
- * when `fn` settles, so work forked inside the timeout is bounded by it.
+ * Timeout or parent cancellation aborts the child. Work forked inside the
+ * callback is cancelled and joined before this function settles.
  */
 export async function timeout<T>(ms: number, fn: () => T | Promise<T>): Promise<T> {
   if (!Number.isFinite(ms) || ms < 0) {

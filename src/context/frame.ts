@@ -1,12 +1,8 @@
 /**
- * ContextFrame — an immutable scope chain of context values (architecture §4, §10).
+ * An immutable chain of execution-context bindings.
  *
- * Implemented as a parent-linked environment (like an interpreter's lexical
- * scope): `with` prepends a node holding just that call's entries — it never
- * copies the parent, so deriving is O(entries) and sibling/forked executions
- * share the whole parent chain by reference with zero duplication. `get` walks
- * newest-first, so a later `with` of the same key shadows the older binding.
- * Reads are O(chain depth); context frames are small and shallow in practice.
+ * Derived frames shadow matching parent keys without changing the parent, so
+ * sibling executions can safely share their inherited context.
  */
 export class ContextFrame {
   private constructor(
@@ -14,7 +10,7 @@ export class ContextFrame {
     private readonly own: ReadonlyMap<PropertyKey, unknown>,
   ) {}
 
-  /** The empty root frame shared by every fresh request execution. */
+  /** The empty root frame shared by new executions. */
   static readonly empty: ContextFrame = new ContextFrame(null, new Map());
 
   get(key: PropertyKey): unknown {
@@ -39,10 +35,7 @@ export class ContextFrame {
     return false;
   }
 
-  /**
-   * Derive a new frame with the given values bound, leaving this frame intact.
-   * Allocates one node (no parent copy); the parent chain is shared.
-   */
+  /** Return a child frame containing the supplied bindings. */
   with(values: Record<PropertyKey, unknown>): ContextFrame {
     const own = new Map<PropertyKey, unknown>();
     for (const key of Reflect.ownKeys(values)) {

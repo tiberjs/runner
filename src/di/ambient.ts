@@ -3,17 +3,14 @@ import { peekState } from "../runtime/state.js";
 import type { Scope } from "./scope.js";
 import type { InjectionToken } from "./tokens.js";
 
-/** Internal construction/startup/teardown context; never an execution owner. */
+/** Scope active during resource construction, startup, or teardown. */
 export const activeScope = new AsyncLocalStorage<Scope>();
 
 /** Construction scope first, otherwise the current execution's resource scope. */
 export function currentScope(): Scope {
   const scope = activeScope.getStore() ?? peekState()?.scope;
   if (!scope) {
-    throw new Error(
-      "No active scope. scoped()/onDispose() must run during construction or " +
-        "inside a request/connection/message handler.",
-    );
+    throw new Error("No active scope. This API requires construction or a managed execution.");
   }
 
   return scope;

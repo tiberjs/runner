@@ -6,8 +6,6 @@
     "moduleResolution": "NodeNext",
     "moduleDetection": "force",
     "types": ["node"],
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
     "verbatimModuleSyntax": true,
     "strict": true,
     "skipLibCheck": true,

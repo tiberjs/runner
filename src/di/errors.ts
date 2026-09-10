@@ -1,6 +1,6 @@
 import { describeToken, type InjectionToken } from "./tokens.js";
 
-/** A framework-owned resolution failure; provider exceptions propagate unchanged. */
+/** A container resolution failure; provider exceptions propagate unchanged. */
 export class ResolutionError extends Error {
   constructor(
     readonly reason: "missing-provider" | "circular-dependency",

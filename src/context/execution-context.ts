@@ -1,10 +1,6 @@
 import type { ContextFrame } from "./frame.js";
 
-/**
- * The state inherited by a single execution: context values, a cancellation
- * signal, and an optional deadline (epoch millis). Immutable — derived contexts
- * are produced by `next(provide(...))`, `fork()`, and `timeout()` (architecture §4).
- */
+/** Immutable values, cancellation, and deadline inherited by an execution's children. */
 export interface ExecutionContext {
   readonly values: ContextFrame;
   readonly signal: AbortSignal;
