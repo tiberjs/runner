@@ -53,3 +53,19 @@ test("raw frames and binding helpers share identity and shadowing semantics", as
     expect(use(Trace)).toBe("trace-1");
   });
 });
+
+test("frames distinguish an undefined binding while use intentionally does not", async () => {
+  const Optional = contextKey<string | undefined>("optional");
+  const Missing = contextKey<string | undefined>("missing");
+  const frame = ContextFrame.from([provide(Optional, undefined)]);
+
+  expect(frame.has(Optional.id)).toBe(true);
+  expect(frame.has(Missing.id)).toBe(false);
+  expect(frame.get(Optional.id)).toBeUndefined();
+  expect(frame.get(Missing.id)).toBeUndefined();
+
+  await execute({ ...seed(), values: frame }, () => {
+    expect(use(Optional)).toBeUndefined();
+    expect(use(Missing)).toBeUndefined();
+  });
+});
