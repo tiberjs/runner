@@ -1,8 +1,12 @@
 import { expect, describe, test } from "vitest";
 import {
   ApplicationLifecycle,
+  contextKey,
   currentScope,
   execute,
+  fork,
+  provide,
+  withContext,
   inject,
   onDispose,
   onStart,
@@ -821,5 +825,43 @@ describe("Scope lifecycle", () => {
 
     await requestScope[Symbol.asyncDispose]();
     expect(events).toEqual(["resolved:app", "startup:done", "execution:cleanup"]);
+  });
+
+  test("a derivation inside construction still owns resources in the constructing scope", async () => {
+    const Tenant = contextKey<string>("tenant");
+    const Built = token<object>("built");
+    const root = new Scope();
+    const events: string[] = [];
+    const joined: PromiseLike<void>[] = [];
+
+    root.provide(Built, () => {
+      withContext([provide(Tenant, "acme")], () => {
+        onDispose(() => {
+          events.push("context");
+        });
+      });
+      joined.push(
+        fork(async () => {
+          onDispose(() => {
+            events.push("fork");
+          });
+        }),
+      );
+
+      return {};
+    });
+
+    const request = root.child();
+    await execute({ scope: request, attachment: undefined }, async () => {
+      root.get(Built);
+
+      await Promise.all(joined);
+    });
+
+    await request[Symbol.asyncDispose]();
+    expect(events).toEqual([]);
+
+    await root[Symbol.asyncDispose]();
+    expect(events).toEqual(["fork", "context"]);
   });
 });
