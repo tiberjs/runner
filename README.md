@@ -1,6 +1,6 @@
 # @tiberjs/runner
 
-`@tiberjs/runner` is the transport-independent execution runtime for TiberJS. It provides immutable execution context, structured concurrency, scoped dependency injection, resource lifecycle management, application lifecycle events, cancellation, deadlines, and tracing without depending on HTTP, WebSocket, RPC, or broker concepts.
+`@tiberjs/runner` is an execution runtime for Node.js. It provides immutable execution context, structured concurrency, scoped dependency injection, resource lifecycle management, application lifecycle events, cancellation, deadlines, and tracing.
 
 Runner is a Node.js ESM package. It requires Node.js 20 or newer.
 
@@ -20,9 +20,7 @@ npm install @tiberjs/runner
 - A `TaskGroup` that owns every task created with `fork()` and joins that work before its execution boundary closes.
 - Hierarchical `Scope` instances for dependency identity, startup hooks, and deterministic resource disposal.
 - `ApplicationLifecycle` for startup, work admission, producer draining, events, and singleton teardown.
-- Transport-neutral primitives such as `timeout()`, `span()`, and `scheduleDeadline()`.
-
-Runner does not define routes, requests, responses, validation schemas, status codes, controller decorators, sockets, or message envelopes. Those contracts belong to packages such as [`@tiberjs/server`](https://github.com/tiberjs/server) and the transport bindings in [`tiberjs/transports`](https://github.com/tiberjs/transports).
+- Runtime primitives such as `timeout()`, `span()`, and `scheduleDeadline()`.
 
 ## Managed execution
 
@@ -61,7 +59,7 @@ const result = await execute(
 
 A scope supplied through `ExecutionSeed.scope` remains owned by the caller. If the seed omits a scope, `execute()` creates and disposes one automatically.
 
-Use `begin()` with `runWith()` only when a transport must keep an execution alive beyond the initial callback, such as while a response stream remains open. In that case the binding owns the returned `RuntimeState`, including its task group and scope, and must close both.
+Use `begin()` with `runWith()` when the caller needs to control the execution lifetime manually. The caller owns the returned `RuntimeState`, including its task group and scope, and must close both.
 
 ## Structured concurrency
 
@@ -95,12 +93,13 @@ The ownership rules are deliberate:
 `timeout()` derives a child signal, deadline, and task group. Timeout or parent cancellation aborts the child, and all work forked inside the callback is joined before `timeout()` settles.
 
 ```ts
+import { setTimeout } from "node:timers/promises";
 import { signal, timeout } from "@tiberjs/runner";
 
 const value = await timeout(1_000, async () => {
   const current = signal();
   current.throwIfAborted();
-  return fetch("https://example.com/data", { signal: current });
+  return setTimeout(250, "ready", { signal: current });
 });
 ```
 
@@ -122,7 +121,7 @@ await execute({ signal: new AbortController().signal, attachment: undefined, val
 });
 ```
 
-`ContextFrame` is immutable. A derived frame shadows matching keys without modifying its parent, so sibling executions can share inherited context safely. `provide()` returns a `ContextEntry`; applying entries to downstream state is the responsibility of the transport's middleware pipeline.
+`ContextFrame` is immutable. A derived frame shadows matching keys without modifying its parent, so sibling executions can share inherited context safely. `provide()` returns a `ContextEntry`; applying entries to downstream state is the responsibility of the calling execution pipeline.
 
 ## Dependency injection and resources
 
@@ -165,7 +164,7 @@ Use `scoped()` when a resource should be acquired once in the active scope witho
 `ApplicationLifecycle` owns a root `Scope` and an `EventBus`.
 
 - `start()` runs registered startup hooks in dependency order and emits `AppStarted`.
-- `admit()` allows a binding to join pending startup or seal synchronous startup before accepting work.
+- `admit()` joins pending startup or seals synchronous startup before accepting work.
 - `onDrain()` registers producer shutdown hooks that complete before resources are disposed.
 - `close()` stops admission, emits `AppClosing`, drains producers, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
 - `close()` is idempotent, and `ApplicationLifecycle` implements `AsyncDisposable`.
@@ -200,47 +199,42 @@ await span("job.refresh", async () => {
 });
 ```
 
-## Transport binding SPI
+## Execution state API
 
-Most application code only needs `execute()`, `fork()`, context accessors, and DI helpers. Transport bindings may additionally use the lower-level SPI:
+Most code only needs `execute()`, `fork()`, context accessors, and DI helpers. Code that manages a longer execution lifetime can use the lower-level state API:
 
 | API                              | Responsibility                                                                        |
 | -------------------------------- | ------------------------------------------------------------------------------------- |
 | `begin()`                        | Create a `RuntimeState` without running or closing it.                                |
 | `runWith()`                      | Make a `RuntimeState` ambient for one synchronous or asynchronous call chain.         |
 | `currentState()` / `peekState()` | Read the active state, throwing or returning `undefined` when no execution is active. |
-| `currentAttachment<T>()`         | Read the native payload attached by the binding.                                      |
-| `TaskGroup`                      | Own tasks when a binding has a lifetime that does not match `execute()`.              |
+| `currentAttachment<T>()`         | Read caller-defined data associated with the current execution.                       |
+| `TaskGroup`                      | Own tasks when their lifetime does not match one `execute()` call.                    |
 | `scheduleDeadline()`             | Schedule a disposable absolute deadline without native timer overflow.                |
 | `COMPLETED`                      | Standard cancellation reason used when an execution finishes normally.                |
 
-A minimal message binding can remain native instead of converting its payload into a universal framework message:
+The attachment is opaque to runner. The caller defines its shape and can expose a typed accessor for code running inside the execution:
 
 ```ts
 import { currentAttachment, execute } from "@tiberjs/runner";
 
-interface Message {
-  topic: string;
-  data: unknown;
+interface Job {
+  id: string;
 }
 
-export function message(): Message {
-  return currentAttachment<Message>();
+function currentJob(): Job {
+  return currentAttachment<Job>();
 }
 
-export async function dispatch<T>(
-  input: Message,
-  shutdown: AbortSignal,
-  handler: () => T | Promise<T>,
-): Promise<T> {
-  return execute(
-    {
-      signal: shutdown,
-      attachment: input,
-    },
-    handler,
-  );
-}
+await execute(
+  {
+    signal: new AbortController().signal,
+    attachment: { id: "job-42" } satisfies Job,
+  },
+  () => {
+    console.log(currentJob().id);
+  },
+);
 ```
 
 ## API overview
