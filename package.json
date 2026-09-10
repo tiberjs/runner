@@ -1,6 +1,6 @@
 {
   "name": "@tiberjs/runner",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Transport-independent execution runtime: immutable context, structured concurrency, dependency injection, and application lifecycle.",
   "type": "module",
   "main": "./dist/index.js",
