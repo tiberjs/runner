@@ -1,5 +1,6 @@
 import { ContextFrame } from "../context/frame.js";
 import type { ContextEntry } from "../context/key.js";
+import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
 import { combinedError } from "../lifecycle/errors.js";
 import { runWith } from "./state.js";
@@ -17,6 +18,12 @@ export interface ExecutionSeed {
   readonly signal?: AbortSignal;
   /** Opaque transport data; defaults to undefined. */
   readonly attachment?: unknown;
+  /**
+   * Resource owner and dependency root for this execution.
+   *
+   * An omitted scope is a disjoint root: application providers are unreachable
+   * and an unregistered class token is constructed locally instead of shared.
+   */
   readonly scope?: Scope;
   /** A prepared frame or bindings materialized into a root frame. */
   readonly values?: ContextFrame | readonly ContextEntry[];
@@ -80,7 +87,8 @@ export async function execute<T>(
 
   try {
     executionSignal.throwIfAborted();
-    result = await runWith(state, async () => handler());
+    // This execution resolves in its own scope, not in the one that started it.
+    result = await activeScope.exit(() => runWith(state, async () => handler()));
     executionSignal.throwIfAborted();
   } catch (error) {
     (errors ??= []).push(error);
@@ -93,7 +101,7 @@ export async function execute<T>(
 
   if (ownsScope) {
     try {
-      await runWith(state, () => state.scope[Symbol.asyncDispose]());
+      await activeScope.exit(() => runWith(state, () => state.scope[Symbol.asyncDispose]()));
     } catch (error) {
       (errors ??= []).push(error);
     }

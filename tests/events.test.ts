@@ -1,12 +1,17 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  ApplicationLifecycle,
   EventBus,
   currentScope,
   eventKey,
   execute,
   fork,
+  inject,
   onDispose,
+  onStart,
+  scoped,
   signal,
+  token,
 } from "../src/index.js";
 
 describe("EventBus", () => {
@@ -321,5 +326,77 @@ describe("EventBus", () => {
     await flushing;
     expect(order).toEqual(["delivered:2", "delivered:1", "cleaned"]);
     await bus.close();
+  });
+
+  test("asynchronous deliveries share application providers but own their resources", async () => {
+    await using app = new ApplicationLifecycle();
+    const Registry = token<{ name: string }>("registry");
+    const Local = token<{ id: number }>("delivery resource");
+    const key = eventKey<void>("changed");
+    const registries: unknown[] = [];
+    const reused: boolean[] = [];
+    const ids: number[] = [];
+    const disposals: number[] = [];
+    let acquired = 0;
+    app.scope.provide(Registry, () => ({ name: "app" }));
+
+    for (let index = 0; index < 2; index++) {
+      app.events.onAsync(key, async () => {
+        registries.push(inject(Registry));
+        const local = scoped(
+          Local,
+          () => ({ id: ++acquired }),
+          (value) => disposals.push(value.id),
+        );
+
+        await Promise.resolve();
+
+        reused.push(scoped(Local, () => ({ id: -1 })) === local);
+        ids.push(local.id);
+      });
+    }
+
+    await app.start();
+    app.events.emit(key, undefined);
+    await app.events.flush();
+
+    const registry = app.scope.get(Registry);
+    expect(registries[0]).toBe(registry);
+    expect(registries[1]).toBe(registry);
+    expect(reused).toEqual([true, true]);
+    expect(ids).toEqual([1, 2]);
+    expect(disposals.toSorted()).toEqual([1, 2]);
+  });
+
+  test("a delivery emitted during startup does not inherit the constructing scope", async () => {
+    await using app = new ApplicationLifecycle();
+    const Registry = token<{ name: string }>("registry");
+    const key = eventKey<void>("changed");
+    const cleanups: string[] = [];
+    let deliveryScope: unknown;
+    let resolved: unknown;
+    app.scope.provide(Registry, () => ({ name: "app" }));
+    app.events.onAsync(key, () => {
+      deliveryScope = currentScope();
+      resolved = inject(Registry);
+      onDispose(() => {
+        cleanups.push("delivery");
+      });
+    });
+
+    class Emitter {
+      constructor() {
+        onStart(() => {
+          app.events.emit(key, undefined);
+        });
+      }
+    }
+    app.scope.get(Emitter);
+    await app.start();
+    await app.events.flush();
+
+    expect(deliveryScope).not.toBe(app.scope);
+    expect(resolved).toBe(app.scope.get(Registry));
+    expect(cleanups).toEqual(["delivery"]);
   });
 });

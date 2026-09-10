@@ -179,6 +179,8 @@ A `Scope` caches each resolved token once. Child scopes can resolve providers fr
 
 Use `scoped()` when a resource should be acquired once in the active scope without registering a provider first. Use `onStart()` during managed construction to register dependency-ordered initialization and `onDispose()` to register LIFO cleanup.
 
+`inject()`, `scoped()`, `onStart()`, and `onDispose()` resolve against the scope that constructs the surrounding resource, and otherwise against the current execution's scope. An execution started from a factory or a startup hook resolves and cleans up in its own scope, not the constructing one.
+
 ## Application lifecycle and events
 
 `ApplicationLifecycle` owns a root `Scope` and an `EventBus`.
@@ -189,7 +191,7 @@ Use `scoped()` when a resource should be acquired once in the active scope witho
 - `close()` stops admission, emits `AppClosing`, drains producers, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
 - `close()` is idempotent, and `ApplicationLifecycle` implements `AsyncDisposable`.
 
-Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()`. Asynchronous listeners run in bus-owned managed executions and are joined by `flush()` or `close()`.
+Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()` and share the emitter's scope. Asynchronous listeners run in bus-owned managed executions joined by `flush()` or `close()`; each delivery owns a child of the bus scope, so a listener resolves application providers, and resources it acquires with `scoped()` or `onDispose()` are released when that delivery ends.
 
 ## Tracing
 

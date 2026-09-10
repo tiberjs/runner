@@ -16,7 +16,7 @@ export class ApplicationLifecycle implements AsyncDisposable {
 
   constructor() {
     this.scope = new Scope(undefined, { startup: true });
-    this.events = new EventBus();
+    this.events = new EventBus(this.scope);
     this.scope.provide(EventBus, () => this.events);
   }
 

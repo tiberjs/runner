@@ -1,10 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { peekState } from "../runtime/state.js";
+import { activeScope } from "./active-scope.js";
 import type { Scope } from "./scope.js";
 import type { InjectionToken } from "./tokens.js";
-
-/** Scope active during resource construction, startup, or teardown. */
-export const activeScope = new AsyncLocalStorage<Scope>();
 
 /** Construction scope first, otherwise the current execution's resource scope. */
 export function currentScope(): Scope {

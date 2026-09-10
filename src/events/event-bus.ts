@@ -1,3 +1,4 @@
+import { Scope } from "../di/scope.js";
 import { begin, execute } from "../runtime/execution.js";
 import { fork } from "../runtime/fork.js";
 import { currentState, runWith, type RuntimeState } from "../runtime/state.js";
@@ -16,7 +17,10 @@ export function eventKey<T>(description: string): EventKey<T> {
 
 /** Synchronous notifications cannot return asynchronous work. */
 export type EventListener<T> = (event: T) => undefined;
-/** Asynchronous deliveries run in independent, bus-owned executions. */
+/**
+ * Asynchronous deliveries run in independent, bus-owned executions. Each owns a
+ * scope disposed when its delivery settles.
+ */
 export type AsyncEventListener<T> = (event: T) => void | PromiseLike<void>;
 
 type Subscription = {
@@ -30,9 +34,19 @@ type Subscription = {
  * Listener errors are reported without changing the emitting execution's result.
  */
 export class EventBus {
+  /** Parent of every delivery scope; owned and disposed by this bus. */
+  readonly #deliveries: Scope;
   #listeners: Map<symbol, Set<Subscription>> | undefined;
   #owner: RuntimeState | undefined;
   #closing: Promise<void> | undefined;
+
+  /**
+   * Asynchronous deliveries resolve dependencies through `scope`. Without one,
+   * a delivery owns its resources but reaches no application provider.
+   */
+  constructor(scope?: Scope) {
+    this.#deliveries = scope ? scope.child() : new Scope();
+  }
 
   on<T>(key: EventKey<T>, listener: EventListener<NoInfer<T>>): () => void {
     return this.#subscribe(key, listener, false);
@@ -82,6 +96,7 @@ export class EventBus {
       const owner = (this.#owner ??= begin({
         signal: new AbortController().signal,
         attachment: undefined,
+        scope: this.#deliveries,
       }));
       const admitted = Promise.withResolvers<void>();
       release = admitted.resolve;
@@ -95,15 +110,23 @@ export class EventBus {
         if (subscription.async) {
           runWith(this.#owner!, () =>
             fork(async () => {
+              const scope = this.#deliveries.child();
               try {
                 await execute(
-                  { signal: currentState().context.signal, attachment: undefined },
+                  { signal: currentState().context.signal, attachment: undefined, scope },
                   async () => subscription.listener(event as never),
                 );
               } catch (error) {
                 // Observe within the owned task: the long-lived bus TaskGroup must
                 // not retain a failed Task for every broken notification sink.
                 reportListenerError(key.description, error);
+              } finally {
+                // execute() leaves a supplied scope to its caller; this one is ours.
+                try {
+                  await scope[Symbol.asyncDispose]();
+                } catch (error) {
+                  reportListenerError(key.description, error);
+                }
               }
             }),
           );
@@ -149,9 +172,10 @@ export class EventBus {
     await this.flush();
     if (this.#owner) {
       await this.#owner.tasks.close();
-      await this.#owner.scope[Symbol.asyncDispose]();
       this.#owner = undefined;
     }
+
+    await this.#deliveries[Symbol.asyncDispose]();
   }
 }
 

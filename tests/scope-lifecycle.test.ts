@@ -1,7 +1,12 @@
 import { expect, describe, test } from "vitest";
 import {
   ApplicationLifecycle,
+  contextKey,
+  currentScope,
   execute,
+  fork,
+  provide,
+  withContext,
   inject,
   onDispose,
   onStart,
@@ -781,5 +786,82 @@ describe("Scope lifecycle", () => {
     ).toThrow(ScopeClosedError);
     await closing;
     expect(events).toEqual(["close"]);
+  });
+
+  test("an execution started during startup resolves its own scope, not the constructing one", async () => {
+    await using app = new ApplicationLifecycle();
+    const Config = token<string>("config");
+    app.scope.provide(Config, () => "app");
+    const requestScope = app.scope.child();
+    const events: string[] = [];
+    let executionScope: unknown;
+
+    class Boot {
+      constructor() {
+        onStart(async () => {
+          await execute(
+            {
+              scope: requestScope,
+              signal: new AbortController().signal,
+              attachment: undefined,
+            },
+            async () => {
+              executionScope = currentScope();
+              events.push(`resolved:${inject(Config)}`);
+              onDispose(() => {
+                events.push("execution:cleanup");
+              });
+            },
+          );
+          events.push("startup:done");
+        });
+      }
+    }
+    app.scope.get(Boot);
+    await app.start();
+
+    expect(executionScope).toBe(requestScope);
+    expect(events).toEqual(["resolved:app", "startup:done"]);
+
+    await requestScope[Symbol.asyncDispose]();
+    expect(events).toEqual(["resolved:app", "startup:done", "execution:cleanup"]);
+  });
+
+  test("a derivation inside construction still owns resources in the constructing scope", async () => {
+    const Tenant = contextKey<string>("tenant");
+    const Built = token<object>("built");
+    const root = new Scope();
+    const events: string[] = [];
+    const joined: PromiseLike<void>[] = [];
+
+    root.provide(Built, () => {
+      withContext([provide(Tenant, "acme")], () => {
+        onDispose(() => {
+          events.push("context");
+        });
+      });
+      joined.push(
+        fork(async () => {
+          onDispose(() => {
+            events.push("fork");
+          });
+        }),
+      );
+
+      return {};
+    });
+
+    const request = root.child();
+    await execute({ scope: request, attachment: undefined }, async () => {
+      root.get(Built);
+
+      await Promise.all(joined);
+    });
+
+    await request[Symbol.asyncDispose]();
+    expect(events).toEqual([]);
+
+    await root[Symbol.asyncDispose]();
+    expect(events).toEqual(["fork", "context"]);
   });
 });
