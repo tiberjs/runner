@@ -1,15 +1,25 @@
+import {
+  assertCanJoin,
+  dependencyFrame,
+  markDependency,
+  releaseDependency,
+  runWithDependency,
+  startupDependency,
+} from "../lifecycle/diagnostics.js";
 import { combinedError } from "../lifecycle/errors.js";
+import { withoutExecution } from "../runtime/state.js";
 import { activeScope } from "./active-scope.js";
 import { ScopeClosedError, ScopeDisposalConflictError, ScopeStartupError } from "./errors.js";
 import type { Scope } from "./scope.js";
+import { HookStartupContext, type StartupContext } from "./startup-context.js";
 
-type Startup = () => void | PromiseLike<void>;
+type Startup = (context: StartupContext) => void | PromiseLike<void>;
 type Cleanup = () => unknown | Promise<unknown>;
 type StartupPhase = "disabled" | "collecting" | "starting" | "started" | "failed";
 
 /** Structural resource hooks. Do not combine onClose with a symbol disposer. */
 export interface ScopeObject {
-  onStart?(): void | PromiseLike<void>;
+  onStart?(context: StartupContext): void | PromiseLike<void>;
   onClose?(): unknown | Promise<unknown>;
 }
 
@@ -113,6 +123,13 @@ export class ResourceLifecycle {
   }
 
   start(): Promise<void> {
+    if (this.#startupPhase === "starting") {
+      try {
+        assertCanJoin(startupDependency(this.scope), "start", "Scope");
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     if (this.#closing) {
       return Promise.reject(new ScopeClosedError(this.#disposed ? "disposed" : "closing"));
     }
@@ -128,13 +145,26 @@ export class ResourceLifecycle {
 
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     this.#starting = promise;
+    markDependency(promise, startupDependency(this.scope));
     this.#startupPhase = "starting";
     void this.#runStartups().then(resolve, reject);
 
     return promise;
   }
 
+  /** Check before the Scope wrapper commits its disposal promise or clears storage. */
+  assertCanClose(): void {
+    if (this.#startupPhase === "starting") {
+      assertCanJoin(startupDependency(this.scope), "asyncDispose", "Scope");
+    }
+  }
+
   close(): Promise<void> {
+    try {
+      this.assertCanClose();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (this.#closing) {
       return this.#closing;
     }
@@ -150,7 +180,21 @@ export class ResourceLifecycle {
     let index = 0;
     try {
       while (!this.#closing && index < (this.#startups?.length ?? 0)) {
-        await activeScope.run(this.scope, this.#startups![index++]!);
+        const hook = this.#startups![index++]!;
+        const context = new HookStartupContext(this.scope);
+        const frame = dependencyFrame(startupDependency(this.scope));
+        try {
+          await withoutExecution(() =>
+            runWithDependency(frame, () =>
+              activeScope.run(this.scope, async () => {
+                await hook(context);
+              }),
+            ),
+          );
+        } finally {
+          context.release();
+          releaseDependency(frame);
+        }
       }
       // Seal in the same continuation that observes the drained queue, not a later .then().
       this.#startupPhase = "started";
@@ -239,7 +283,7 @@ export class ResourceLifecycle {
       }
       const onStart = (value as ScopeObject).onStart;
       if (typeof onStart === "function") {
-        this.addStartup(() => onStart.call(value));
+        this.addStartup((context) => onStart.call(value, context));
       }
     } catch (error) {
       owners.set(value, { rejected: error });

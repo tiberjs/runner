@@ -1,4 +1,10 @@
 import { combinedError } from "../lifecycle/errors.js";
+import {
+  assertCanJoin,
+  assertTaskConsumable,
+  LifecycleStateError,
+  type DependencyToken,
+} from "../lifecycle/diagnostics.js";
 
 interface FulfilledOutcome<T> {
   readonly status: "fulfilled";
@@ -39,6 +45,12 @@ export class Task<T> implements PromiseLike<T> {
     onfulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
     onrejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
   ): Promise<R1 | R2> {
+    try {
+      assertTaskConsumable(this);
+    } catch (error) {
+      // A rejected consumption attempt does not transfer ownership of the task.
+      return Promise.reject(error).then(onfulfilled, onrejected);
+    }
     // Awaiting/chaining a task means its outcome is owned by the caller.
     this.wasObserved = true;
     const listeners = this.observationListeners;
@@ -94,9 +106,25 @@ export class TaskGroup {
   private failures: Set<{
     readonly reason: unknown;
   }> | null = null;
-  private closing = false;
+  private state: "open" | "closing" | "closed" = "open";
   private closePromise: Promise<void> | undefined;
   private failureListeners: Set<() => void> | undefined;
+  #dependency: DependencyToken | undefined;
+
+  /** @internal Lazy identity shared with the execution frames of this group's tasks. */
+  get dependency(): DependencyToken {
+    return (this.#dependency ??= { owner: "TaskGroup" });
+  }
+
+  /** @internal Reject self-joins and joins of tasks gated on the caller's startup. */
+  assertCanJoin(operation: string, owner = "TaskGroup"): void {
+    if (this.#dependency) {
+      assertCanJoin(this.#dependency, operation, owner);
+    }
+    for (const task of this.tasks ?? []) {
+      assertTaskConsumable(task, operation, owner);
+    }
+  }
 
   /** @internal Observe unowned failures without changing sibling cancellation. */
   onFailure(listener: () => void): () => void {
@@ -113,9 +141,9 @@ export class TaskGroup {
   }
 
   /** @internal Reject work submitted after the execution boundary closed. */
-  assertOpen(): void {
-    if (this.closing) {
-      throw new Error("TaskGroup is closed.");
+  assertOpen(operation = "add"): void {
+    if (this.state !== "open") {
+      throw new LifecycleStateError("TaskGroup", operation, this.state);
     }
   }
 
@@ -164,6 +192,7 @@ export class TaskGroup {
   }
 
   async join(): Promise<void> {
+    this.assertCanJoin("join");
     if (!this.tasks) {
       return;
     }
@@ -176,16 +205,30 @@ export class TaskGroup {
   }
 
   close(reason?: unknown): Promise<void> {
+    try {
+      this.assertCanJoin("close");
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (this.closePromise) {
       return this.closePromise;
     }
 
-    this.closing = true;
+    this.state = "closing";
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     this.closePromise = promise;
 
     this.cancel(reason);
-    void this.join().then(resolve, reject);
+    void this.join().then(
+      () => {
+        this.state = "closed";
+        resolve();
+      },
+      (error: unknown) => {
+        this.state = "closed";
+        reject(error);
+      },
+    );
 
     return promise;
   }

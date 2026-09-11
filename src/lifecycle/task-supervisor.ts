@@ -7,6 +7,7 @@ import { fork } from "../runtime/fork.js";
 import { currentState, runWith, type RuntimeState } from "../runtime/state.js";
 import type { Task } from "../runtime/task-group.js";
 import { combinedError } from "./errors.js";
+import { LifecycleStateError, setWaitingFor, withoutDependencies } from "./diagnostics.js";
 
 /** Only explicitly supplied values cross into a background execution. */
 export interface BackgroundSeed {
@@ -22,6 +23,7 @@ type Handler<T> = () => T | Promise<T>;
 export class TaskSupervisor implements AsyncDisposable {
   #owner: RuntimeState | undefined;
   #closing: Promise<void> | undefined;
+  #closed = false;
 
   /** The optional admission gate runs before each handler (for application startup). */
   constructor(
@@ -34,7 +36,7 @@ export class TaskSupervisor implements AsyncDisposable {
   run<T>(seed: BackgroundSeed, handler: Handler<T>): Task<T>;
   run<T>(seedOrHandler: BackgroundSeed | Handler<T>, suppliedHandler?: Handler<T>): Task<T> {
     if (this.#closing) {
-      throw new Error("Task supervisor is closed.");
+      throw new LifecycleStateError("TaskSupervisor", "run", this.#closed ? "closed" : "closing");
     }
     const handler = typeof seedOrHandler === "function" ? seedOrHandler : suppliedHandler;
     if (typeof handler !== "function") {
@@ -50,52 +52,67 @@ export class TaskSupervisor implements AsyncDisposable {
           : ContextFrame.from(entries);
     // Getters and binding iterators can reenter close() during materialization.
     if (this.#closing) {
-      throw new Error("Task supervisor is closed.");
+      throw new LifecycleStateError("TaskSupervisor", "run", this.#closed ? "closed" : "closing");
     }
     const owner = (this.#owner ??= begin({ scope: this.scope }));
 
     // Neither a submitting execution nor an active DI construction owns this task.
     return activeScope.exit(() =>
-      runWith(owner, () =>
-        fork(async () => {
-          const signal = currentState().context.signal;
-          const admission = this.admit?.();
-          if (admission) {
-            await admission;
-          }
-          signal.throwIfAborted();
+      withoutDependencies(() =>
+        runWith(owner, () =>
+          fork(async () => {
+            const signal = currentState().context.signal;
+            // Mark a known gate before invoking it: admission can synchronously
+            // start hooks which try to join this very first submission.
+            setWaitingFor(this.admit);
+            try {
+              const admission = this.admit?.();
+              if (admission) {
+                setWaitingFor(admission);
+                await admission;
+              }
+            } finally {
+              setWaitingFor(undefined);
+            }
+            signal.throwIfAborted();
 
-          const scope = this.scope.child();
-          let state: RuntimeState | undefined;
-          let result!: T;
-          let errors: unknown[] | undefined;
-          try {
-            result = await execute({ scope, signal, values }, () => {
-              state = currentState();
-              return handler();
-            });
-          } catch (error) {
-            (errors ??= []).push(error);
-          }
+            const scope = this.scope.child();
+            let state: RuntimeState | undefined;
+            let result!: T;
+            let errors: unknown[] | undefined;
+            try {
+              result = await execute({ scope, signal, values }, () => {
+                state = currentState();
+                return handler();
+              });
+            } catch (error) {
+              (errors ??= []).push(error);
+            }
 
-          try {
-            // execute() joins descendants but leaves its supplied scope to us.
-            await activeScope.exit(() =>
-              state
-                ? runWith(state, () => scope[Symbol.asyncDispose]())
-                : scope[Symbol.asyncDispose](),
-            );
-          } catch (error) {
-            (errors ??= []).push(error);
-          }
-          if (errors) {
-            throw combinedError(errors, "Background execution and cleanup failed.");
-          }
-          signal.throwIfAborted();
-          return result;
-        }),
+            try {
+              // execute() joins descendants but leaves its supplied scope to us.
+              await activeScope.exit(() =>
+                state
+                  ? runWith(state, () => scope[Symbol.asyncDispose]())
+                  : scope[Symbol.asyncDispose](),
+              );
+            } catch (error) {
+              (errors ??= []).push(error);
+            }
+            if (errors) {
+              throw combinedError(errors, "Background execution and cleanup failed.");
+            }
+            signal.throwIfAborted();
+            return result;
+          }),
+        ),
       ),
     );
+  }
+
+  /** @internal Check a parent barrier before it commits shutdown/admission state. */
+  assertCanJoin(operation: string, owner = "TaskSupervisor"): void {
+    this.#owner?.tasks.assertCanJoin(operation, owner);
   }
 
   /**
@@ -104,6 +121,7 @@ export class TaskSupervisor implements AsyncDisposable {
    * Do not await this barrier from a task it must join.
    */
   async flush(): Promise<void> {
+    this.assertCanJoin("flush");
     await this.#owner?.tasks.join();
     if (this.#owner?.tasks.failed) {
       throw this.#owner.tasks.failure;
@@ -115,6 +133,11 @@ export class TaskSupervisor implements AsyncDisposable {
    * Do not await close from a task it must join.
    */
   close(): Promise<void> {
+    try {
+      this.assertCanJoin("close");
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (this.#closing) {
       return this.#closing;
     }
@@ -129,9 +152,13 @@ export class TaskSupervisor implements AsyncDisposable {
   }
 
   async #shutdown(): Promise<void> {
-    await this.#owner?.tasks.close();
-    if (this.#owner?.tasks.failed) {
-      throw this.#owner.tasks.failure;
+    try {
+      await this.#owner?.tasks.close();
+      if (this.#owner?.tasks.failed) {
+        throw this.#owner.tasks.failure;
+      }
+    } finally {
+      this.#closed = true;
     }
   }
 }

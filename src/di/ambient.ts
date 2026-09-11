@@ -1,6 +1,7 @@
 import { peekState } from "../runtime/state.js";
 import { activeScope } from "./active-scope.js";
 import type { Scope } from "./scope.js";
+import type { StartupContext } from "./startup-context.js";
 import type { InjectionToken } from "./tokens.js";
 
 /** Construction scope first, otherwise the current execution's resource scope. */
@@ -28,7 +29,7 @@ export function scoped<T>(
 }
 
 /** Register dependency-first initialization in an owned, open startup barrier. */
-export function onStart(callback: () => void | PromiseLike<void>): void {
+export function onStart(callback: (context: StartupContext) => void | PromiseLike<void>): void {
   currentScope().addStartup(callback);
 }
 

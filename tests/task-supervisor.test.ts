@@ -3,6 +3,7 @@ import { expect, test } from "vitest";
 import {
   AppClosing,
   ApplicationLifecycle,
+  LifecycleStateError,
   Scope,
   TaskSupervisor,
   contextKey,
@@ -466,28 +467,30 @@ test("a descendant failure remains owned after the top-level handler returns", a
   await expect(app.close()).rejects.toBe(failure);
 });
 
-test("closing reentrantly from a handler seals admission before cancellation callbacks run", async () => {
+test("external shutdown seals admission before task cancellation callbacks run", async () => {
   const app = new ApplicationLifecycle();
-  let closing: Promise<void> | undefined;
-  let rejected = false;
-  const task = app.background.run(() => {
+  const ready = Promise.withResolvers<void>();
+  let rejected: unknown;
+  const task = app.background.run(async () => {
     const current = signal();
     current.addEventListener(
       "abort",
       () => {
         try {
           app.background.run(() => undefined);
-        } catch {
-          rejected = true;
+        } catch (error) {
+          rejected = error;
         }
       },
       { once: true },
     );
-    closing = app.close();
+    ready.resolve();
+    await untilAbort();
   });
-  await Promise.resolve(task).catch(() => undefined);
-  await closing;
-  expect(rejected).toBe(true);
+  await ready.promise;
+  const closing = app.close();
+  await Promise.all([expect(Promise.resolve(task)).rejects.toBe(task.signal.reason), closing]);
+  expect(rejected).toBeInstanceOf(LifecycleStateError);
 });
 
 test("unobserved submissions do not multiply the application's startup failure", async () => {

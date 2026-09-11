@@ -2,6 +2,7 @@ import { ResolutionError } from "./errors.js";
 import { ResourceLifecycle } from "./resources.js";
 import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
 import type { Factory, InjectionToken } from "./tokens.js";
+import type { StartupContext } from "./startup-context.js";
 
 export interface ScopeOptions {
   /** The owner promises to await start() before admitting work. Never inherited. */
@@ -120,7 +121,7 @@ export class Scope {
   }
 
   /** @internal Startup callbacks commit only after successful construction. */
-  addStartup(callback: () => void | PromiseLike<void>): void {
+  addStartup(callback: (context: StartupContext) => void | PromiseLike<void>): void {
     this.#resourceLifecycle.addStartup(callback);
   }
 
@@ -140,6 +141,11 @@ export class Scope {
 
   /** Close acquisition synchronously, then clear resolution storage after teardown. */
   [Symbol.asyncDispose](): Promise<void> {
+    try {
+      this.#resourceLifecycle.assertCanClose();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (this.#disposePromise) {
       return this.#disposePromise;
     }
