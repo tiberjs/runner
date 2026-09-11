@@ -1,4 +1,10 @@
 import { combinedError } from "../lifecycle/errors.js";
+import {
+  dependencyFrame,
+  releaseDependency,
+  runWithDependency,
+  trackTaskDependency,
+} from "../lifecycle/diagnostics.js";
 import { isCancellation, linkAbort } from "./abort.js";
 import { currentState, runWith } from "./state.js";
 import type { RuntimeState } from "./state.js";
@@ -13,7 +19,7 @@ import { Task, TaskGroup } from "./task-group.js";
 export function fork<T>(fn: () => T | Promise<T>): Task<T> {
   const state = currentState();
   const group = state.tasks;
-  group.assertOpen();
+  group.assertOpen("fork");
 
   const controller = new AbortController();
   const unlink = linkAbort(state.context.signal, controller);
@@ -26,24 +32,30 @@ export function fork<T>(fn: () => T | Promise<T>): Task<T> {
   const { promise, resolve, reject } = Promise.withResolvers<T>();
   const task = new Task(promise, controller);
   group.add(task);
+  const dependency = dependencyFrame(group.dependency);
+  trackTaskDependency(task, dependency);
 
   // Register ownership before invoking user code: a synchronous throw must
   // never report an uninitialized Task.
-  void runWith(childState, async () => {
-    try {
-      controller.signal.throwIfAborted();
-      resolve(await fn());
-    } catch (error) {
-      // Cancellation does not excuse unrelated errors thrown by finalizers.
-      if (!isCancellation(error, controller.signal)) {
-        group.reportFailure(task, error);
-      }
+  void runWithDependency(dependency, () =>
+    runWith(childState, async () => {
+      try {
+        controller.signal.throwIfAborted();
+        resolve(await fn());
+      } catch (error) {
+        // Cancellation does not excuse unrelated errors thrown by finalizers.
+        if (!isCancellation(error, controller.signal)) {
+          group.reportFailure(task, error);
+        }
 
-      reject(error);
-    } finally {
-      unlink();
-    }
-  });
+        reject(error);
+      } finally {
+        unlink();
+        releaseDependency(dependency);
+        trackTaskDependency(task, undefined);
+      }
+    }),
+  );
 
   return task;
 }

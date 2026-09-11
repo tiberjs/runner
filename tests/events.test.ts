@@ -2,6 +2,11 @@ import { describe, expect, test, vi } from "vitest";
 import {
   ApplicationLifecycle,
   EventBus,
+  LifecycleDependencyError,
+  LifecycleStateError,
+  Scope,
+  type EventBusOptions,
+  type EventErrorContext,
   currentScope,
   eventKey,
   execute,
@@ -87,11 +92,12 @@ describe("EventBus", () => {
 
     await bus.close();
     await bus.close();
-    bus.emit(key, 3);
+    expect(() => bus.emit(key, 3)).toThrow(LifecycleStateError);
 
     expect(received).toStrictEqual([1, 2]);
     expect(bus.hasListeners(key)).toBe(false);
-    expect(() => bus.on(key, listener)).toThrow();
+    expect(() => bus.on(key, listener)).toThrow(LifecycleStateError);
+    expect(() => bus.onAsync(key, listener)).toThrow(LifecycleStateError);
   });
 
   test("listener and diagnostic failures do not starve later subscribers", () => {
@@ -232,11 +238,16 @@ describe("EventBus", () => {
     const order: string[] = [];
     const cancellations: boolean[] = [];
     let reentrant: Promise<void> | undefined;
+    let rejectedEmission: unknown;
     bus.on(key, () => {
       order.push("first");
       offLast();
       reentrant = bus.close();
-      bus.emit(key, undefined);
+      try {
+        bus.emit(key, undefined);
+      } catch (error) {
+        rejectedEmission = error;
+      }
     });
     bus.onAsync(key, async () => {
       order.push("async");
@@ -260,10 +271,16 @@ describe("EventBus", () => {
     try {
       await Promise.resolve();
       expect(reentrant).toBe(closing);
+      expect(rejectedEmission).toBeInstanceOf(LifecycleStateError);
+      expect(rejectedEmission).toMatchObject({
+        owner: "EventBus",
+        operation: "emit",
+        state: "closing",
+      });
       expect(closed).toBe(false);
       expect(order).toEqual(["first", "async", "last"]);
       expect(bus.hasListeners(key)).toBe(false);
-      expect(() => bus.onAsync(key, () => {})).toThrow();
+      expect(() => bus.onAsync(key, () => {})).toThrow(LifecycleStateError);
     } finally {
       release.resolve();
     }
@@ -443,5 +460,229 @@ describe("EventBus", () => {
     } finally {
       report.mockRestore();
     }
+  });
+
+  test("invalid reporters are rejected before acquiring a delivery scope", async () => {
+    const scope = new Scope();
+    await scope[Symbol.asyncDispose]();
+    expect(() => new EventBus(scope, { onError: 42 } as unknown as EventBusOptions)).toThrow(
+      TypeError,
+    );
+  });
+
+  test("an empty bus rejects emission and subscription throughout shutdown", async () => {
+    const bus = new EventBus();
+    const key = eventKey<void>("never subscribed");
+    const closing = bus.close();
+    expect(() => bus.emit(key, undefined)).toThrow(LifecycleStateError);
+    expect(() => bus.on(key, () => {})).toThrow(LifecycleStateError);
+    await closing;
+    let failure: unknown;
+    try {
+      bus.emit(key, undefined);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(LifecycleStateError);
+    expect(failure).toMatchObject({ owner: "EventBus", operation: "emit", state: "closed" });
+  });
+
+  test("custom diagnostics preserve sync and async errors with their event descriptions", async () => {
+    const reports: { error: unknown; context: EventErrorContext }[] = [];
+    const bus = new EventBus(undefined, {
+      onError(error, context) {
+        reports.push({ error, context });
+      },
+    });
+    const sync = eventKey<void>("sync failure");
+    const async = eventKey<void>("async failure");
+    const cause = new Error("original cause");
+    const syncFailure = new Error("sync", { cause });
+    const asyncFailure = new AggregateError([cause], "async", { cause });
+    bus.on(sync, () => {
+      throw syncFailure;
+    });
+    bus.onAsync(async, async () => {
+      await Promise.resolve();
+      throw asyncFailure;
+    });
+    bus.emit(sync, undefined);
+    bus.emit(async, undefined);
+    await bus.close();
+    expect(reports).toEqual([
+      { error: syncFailure, context: { event: sync.description } },
+      { error: asyncFailure, context: { event: async.description } },
+    ]);
+    expect(reports[0]?.error).toBe(syncFailure);
+    expect(reports[1]?.error).toBe(asyncFailure);
+    expect(syncFailure.cause).toBe(cause);
+    expect(asyncFailure.cause).toBe(cause);
+  });
+
+  test("throwing custom diagnostics safely report both failures without starving delivery", async () => {
+    const reporterFailure = new Error("reporter failed");
+    const syncFailure = new Error("sync listener failed");
+    const asyncFailure = new Error("async listener failed");
+    const reports: unknown[] = [];
+    const received: string[] = [];
+    const bus = new EventBus(undefined, {
+      onError(error) {
+        reports.push(error);
+        throw reporterFailure;
+      },
+    });
+    const key = eventKey<void>("changed");
+    bus.on(key, () => {
+      throw syncFailure;
+    });
+    bus.onAsync(key, async () => {
+      await Promise.resolve();
+      throw asyncFailure;
+    });
+    bus.on(key, () => {
+      received.push("sync");
+    });
+    bus.onAsync(key, () => {
+      received.push("async");
+    });
+    const fallback = vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("fallback failed too");
+    });
+    try {
+      bus.emit(key, undefined);
+      await bus.close();
+      expect(reports).toEqual([syncFailure, asyncFailure]);
+      expect(received).toEqual(["sync", "async"]);
+      expect(fallback.mock.calls.map((call) => call[1])).toEqual([
+        syncFailure,
+        reporterFailure,
+        asyncFailure,
+        reporterFailure,
+      ]);
+    } finally {
+      fallback.mockRestore();
+    }
+  });
+
+  test("diagnostics cannot borrow publisher execution or construction resources", async () => {
+    const failures: unknown[] = [];
+    const bus = new EventBus(undefined, {
+      onError() {
+        try {
+          onDispose(() => {});
+        } catch (error) {
+          failures.push(error);
+        }
+      },
+    });
+    const key = eventKey<void>("failed");
+    bus.on(key, () => {
+      throw new Error("listener failed");
+    });
+    await using scope = new Scope();
+    class Emitter {
+      constructor() {
+        bus.emit(key, undefined);
+      }
+    }
+    await execute({ scope }, () => {
+      scope.get(Emitter);
+      bus.emit(key, undefined);
+    });
+    await bus.close();
+    expect(failures).toHaveLength(2);
+    expect(failures.every((error) => error instanceof Error)).toBe(true);
+  });
+
+  test("diagnostic work is independent of listener dependencies and not joined by the bus", async () => {
+    const release = Promise.withResolvers<void>();
+    const dependencyFailures: unknown[] = [];
+    let diagnostic: Promise<void> | undefined;
+    let finished = false;
+    const bus = new EventBus(undefined, {
+      onError() {
+        try {
+          bus.assertCanJoin("flush");
+        } catch (error) {
+          dependencyFailures.push(error);
+        }
+        diagnostic = execute({}, async () => {
+          await release.promise;
+          finished = true;
+        });
+      },
+    });
+    const outer = eventKey<void>("async delivery");
+    const inner = eventKey<void>("sync failure");
+    bus.on(inner, () => {
+      throw new Error("listener failed");
+    });
+    bus.onAsync(outer, () => {
+      bus.emit(inner, undefined);
+    });
+    try {
+      bus.emit(outer, undefined);
+      await bus.close();
+      expect(dependencyFailures).toEqual([]);
+      expect(diagnostic).toBeDefined();
+      expect(finished).toBe(false);
+    } finally {
+      release.resolve();
+      await diagnostic;
+    }
+    expect(finished).toBe(true);
+  });
+
+  test.each(["flush", "close"] as const)(
+    "a listener cannot join its own %s barrier and rejected closure leaves admission open",
+    async (operation) => {
+      const bus = new EventBus();
+      const key = eventKey<void>("changed");
+      const failures: unknown[] = [];
+      let received = 0;
+      const off = bus.onAsync(key, async () => {
+        await Promise.resolve();
+        try {
+          await bus[operation]();
+        } catch (error) {
+          failures.push(error);
+        }
+        received++;
+      });
+      bus.emit(key, undefined);
+      await bus.flush();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toBeInstanceOf(LifecycleDependencyError);
+      expect(failures[0]).toMatchObject({ owner: "EventBus", operation });
+      off();
+      bus.on(key, () => {
+        received++;
+      });
+      bus.emit(key, undefined);
+      await bus.close();
+      expect(received).toBe(2);
+    },
+  );
+
+  test("a listener cannot join an already-closing bus", async () => {
+    const bus = new EventBus();
+    const key = eventKey<void>("changed");
+    const release = Promise.withResolvers<void>();
+    let failure: unknown;
+    bus.onAsync(key, async () => {
+      await release.promise;
+      try {
+        await bus.close();
+      } catch (error) {
+        failure = error;
+      }
+    });
+    bus.emit(key, undefined);
+    const closing = bus.close();
+    release.resolve();
+    await closing;
+    expect(failure).toBeInstanceOf(LifecycleDependencyError);
+    expect(failure).toMatchObject({ owner: "EventBus", operation: "close" });
+    expect(bus.close()).toBe(closing);
   });
 });

@@ -1,5 +1,6 @@
 import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
+import { LifecycleStateError, withoutDependencies } from "../lifecycle/diagnostics.js";
 import { TaskSupervisor } from "../lifecycle/task-supervisor.js";
 import { withoutExecution } from "../runtime/state.js";
 
@@ -23,6 +24,16 @@ export type EventListener<T> = (event: T) => undefined;
  */
 export type AsyncEventListener<T> = (event: T) => void | PromiseLike<void>;
 
+/** Details identifying a failed event delivery. */
+export interface EventErrorContext {
+  readonly event: string;
+}
+
+export interface EventBusOptions {
+  /** Synchronous diagnostics; any asynchronous work remains caller-owned. */
+  readonly onError?: (error: unknown, context: EventErrorContext) => undefined;
+}
+
 type Subscription = {
   readonly listener: AsyncEventListener<never>;
   readonly async: boolean;
@@ -39,12 +50,19 @@ export class EventBus {
   #listeners: Map<symbol, Set<Subscription>> | undefined;
   #supervisor: TaskSupervisor | undefined;
   #closing: Promise<void> | undefined;
+  #closed = false;
+  readonly #onError: EventBusOptions["onError"];
 
   /**
    * Asynchronous deliveries resolve dependencies through `scope`. Without one,
    * a delivery owns its resources but reaches no application provider.
    */
-  constructor(scope?: Scope) {
+  constructor(scope?: Scope, options?: EventBusOptions) {
+    const onError = options?.onError;
+    if (onError !== undefined && typeof onError !== "function") {
+      throw new TypeError("EventBus onError must be a function.");
+    }
+    this.#onError = onError;
     this.#deliveries = scope ? scope.child() : new Scope();
   }
 
@@ -58,7 +76,11 @@ export class EventBus {
 
   #subscribe<T>(key: EventKey<T>, listener: AsyncEventListener<T>, async: boolean): () => void {
     if (this.#closing) {
-      throw new Error("Event bus is closed");
+      throw new LifecycleStateError(
+        "EventBus",
+        async ? "onAsync" : "on",
+        this.#closed ? "closed" : "closing",
+      );
     }
 
     const listeners = (this.#listeners ??= new Map());
@@ -84,6 +106,10 @@ export class EventBus {
   }
 
   emit<T>(key: EventKey<T>, event: NoInfer<T>): void {
+    if (this.#closing) {
+      throw new LifecycleStateError("EventBus", "emit", this.#closed ? "closed" : "closing");
+    }
+
     const subscribers = this.#listeners?.get(key.id);
     if (!subscribers?.size) {
       return;
@@ -109,16 +135,18 @@ export class EventBus {
           // callback must not retain the request or its construction scope.
           void activeScope.exit(() =>
             withoutExecution(() =>
-              this.#supervisor!
-                .run(async () => subscription.listener(event as never))
-                .then(undefined, (error: unknown) => reportListenerError(key.description, error)),
+              withoutDependencies(() =>
+                this.#supervisor!
+                  .run(async () => subscription.listener(event as never))
+                  .then(undefined, (error: unknown) => this.#report(key.description, error)),
+              ),
             ),
           );
         } else {
           try {
             subscription.listener(event as never);
           } catch (error) {
-            reportListenerError(key.description, error);
+            this.#report(key.description, error);
           }
         }
       }
@@ -132,11 +160,23 @@ export class EventBus {
    * cancelling them. Do not await this barrier from a listener it must join.
    */
   async flush(): Promise<void> {
+    this.assertCanJoin("flush");
     await this.#supervisor?.flush();
+  }
+
+  /** @internal Guard barriers that join this bus's listeners before changing state. */
+  assertCanJoin(operation: string, owner = "EventBus"): void {
+    this.#supervisor?.assertCanJoin(operation, owner);
   }
 
   /** Stop admission synchronously, then join deliveries. Idempotent; never cancels. */
   close(): Promise<void> {
+    try {
+      this.assertCanJoin("close");
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     if (this.#closing) {
       return this.#closing;
     }
@@ -148,7 +188,16 @@ export class EventBus {
     }
     this.#listeners?.clear();
     this.#listeners = undefined;
-    void this.#shutdown().then(resolve, reject);
+    void this.#shutdown().then(
+      () => {
+        this.#closed = true;
+        resolve();
+      },
+      (error: unknown) => {
+        this.#closed = true;
+        reject(error);
+      },
+    );
     return promise;
   }
 
@@ -161,6 +210,25 @@ export class EventBus {
     }
 
     await this.#deliveries[Symbol.asyncDispose]();
+  }
+
+  #report(description: string, error: unknown): void {
+    activeScope.exit(() =>
+      withoutExecution(() =>
+        withoutDependencies(() => {
+          if (!this.#onError) {
+            reportListenerError(description, error);
+            return;
+          }
+          try {
+            this.#onError(error, { event: description });
+          } catch (reporterError) {
+            reportListenerError(description, error);
+            reportListenerError(description, reporterError);
+          }
+        }),
+      ),
+    );
   }
 }
 

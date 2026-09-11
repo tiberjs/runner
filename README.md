@@ -57,11 +57,11 @@ const result = await execute(
 );
 ```
 
-A scope supplied through `ExecutionSeed.scope` remains owned by the caller. If the seed omits a scope, `execute()` creates and disposes one automatically.
+A scope supplied through `ExecutionSeed.scope` is borrowed and remains owned by the caller. Use `{ parentScope: app.scope }` to create an execution-owned child that resolves application providers and is disposed when the execution finishes. Omitting both fields creates an owned root scope; supplying both is rejected. Ancestor providers retain their existing ownership—use `scoped()` or `onDispose()` for execution-local resources.
 
 `execute(handler)` uses a fresh, non-aborted signal and an `undefined` attachment. Use `execute(options, handler)` when supplying context values, an external cancellation signal, an attachment, a deadline, or a scope.
 
-Use `begin()` with `runWith()` when the caller needs to control the execution lifetime manually. The caller owns the returned `RuntimeState`, including its task group and scope, and must close both.
+Use `begin()` with `runWith()` when the caller needs to control the execution lifetime manually. The caller owns the returned `RuntimeState`, including its task group and scope, and must close both. `parentScope` also creates a child for `begin()`, but does not add automatic disposal.
 
 ## Structured concurrency
 
@@ -201,7 +201,7 @@ await execute(
 
 Frame immutability covers binding identity and shadowing, not deep immutability of bound values. Values are stored by reference and are not cloned or frozen. Prefer execution-scoped metadata such as tenant, request, trace, or transaction identity; put services and owned resources in `Scope` rather than using context as a service locator.
 
-`use()` returns `undefined` both when no binding exists and when a key is explicitly bound to `undefined`. This is intentional. Encode a distinct sentinel in the value type when three-state semantics are required. Framework code that must inspect binding presence can use `ContextFrame.has()`.
+`use()` returns `undefined` both when no binding exists and when a key is explicitly bound to `undefined`. `hasContext(key)` tests presence, including inherited bindings and explicit `undefined`; `requireContext(key)` returns the bound value or throws `MissingContextError` when absent. That error exposes the key, not bound values. An explicit `undefined` is a valid value, so `requireContext()` does not narrow it out of the key's type.
 
 As with every `AsyncLocalStorage` context, asynchronous work created inside `withContext()` retains the derived state until that work settles, even if the handler has returned. Await or return such work, or start owned concurrent work with `fork()` so its `TaskGroup` cancels and joins it at the execution boundary.
 
@@ -255,11 +255,15 @@ Use `scoped()` when a resource should be acquired once in the active scope witho
 - `close()` stops admission, cancels background work, emits `AppClosing`, joins producers and background cleanup, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
 - `close()` is idempotent, and `ApplicationLifecycle` implements `AsyncDisposable`.
 
-Startup hooks run in the application scope without inheriting the initiating request, task, or construction context; `AppStarted` is emitted outside that caller context too. Explicit `start()` and startup triggered by `admit()` have the same isolation. Startup does not implicitly create a managed execution: a hook that needs `signal()` or `fork()` must start and await an explicit `execute()` (pass `{ scope: app.scope }` to use application providers). Cancelling an individual background task does not cancel shared initialization.
+Startup hooks run in the application scope without inheriting the initiating request, task, or construction context; `AppStarted` is emitted outside that caller context too. Explicit `start()` and startup triggered by `admit()` have the same isolation. Startup does not implicitly create a managed execution. A hook needing `signal()` or `fork()` can use `onStart(async ({ execute }) => { await execute(warmup); })`: `StartupContext.execute()` borrows the hook's scope, joins its tasks, and leaves application resources alive until shutdown. Always await or return the helper's promise; the helper expires when the hook settles. Cancelling an individual background task does not cancel shared initialization.
 
 Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()` and share the emitter's scope. Asynchronous listeners run in bus-owned managed executions joined by `flush()` or `close()`; each delivery owns a child of the bus scope, so a listener resolves application providers, and resources it acquires with `scoped()` or `onDispose()` are released when that delivery ends.
 
 EventBus uses a separate `TaskSupervisor`, not `app.background`. It applies no startup admission gate and drains all admitted deliveries before closing its supervisor, so neither startup notifications nor shutdown notifications are cancelled. Asynchronous listener and per-delivery cleanup failures are reported after delivery settles without rejecting the publisher or delivery barriers; simultaneous failures preserve their original causes in an `AggregateError`.
+
+Configure synchronous error reporting with `new EventBus(scope, { onError(error, { event }) { /* report */ } })` or `new ApplicationLifecycle({ events: { onError } })`. `event` is the key's description. The sink receives the original error outside listener execution and DI context; it must return `undefined`, not a promise. A throwing sink is isolated and falls back to safe console reporting of both errors. Omit the sink to keep the console default. This is a notification error sink, not a reliable delivery queue.
+
+`LifecycleStateError` exposes `owner`, `operation`, and `state` (`"closing"` or `"closed"`) for rejected lifecycle admission. **Breaking change:** `EventBus.emit()` throws after bus closing starts, even with no listeners; it no longer silently drops such emissions. Repeated `close()` remains idempotent. Closing an application is not immediate scope disposal: drain hooks and admitted deliveries can still use resources until their teardown phase.
 
 ### Application-owned background work
 
@@ -288,7 +292,7 @@ The returned task settles after its handler, child tasks, and scope cleanup fini
 - `await app.background.flush()` waits without cancelling work and leaves admission open.
 - `await app.background.close()` permanently stops admission, cancels active work, and joins cleanup. `app.close()` does this automatically, before shared resources are disposed.
 
-Cancellation is cooperative. Flush before application shutdown if work must finish naturally; do not await a supervisor's flush/close (or `app.close()`) inside a task it must join. Background handlers wait for startup, so startup hooks must not await those handlers.
+Cancellation is cooperative. Flush before application shutdown if work must finish naturally. `LifecycleDependencyError` rejects direct self-joins before committing closing state: startup consuming a task gated on that startup (through `await` or `.then()`), tasks joining their own group/supervisor/application, and listeners joining their own bus/application. Startup may still submit work without consuming it; use `StartupContext.execute()` for awaited warmup. A rejected early task-consumption attempt does not transfer failure ownership. Shutdown should be coordinated outside the work it joins, even if a caller intends not to await `close()`. These guards cover Runner-owned barriers, not arbitrary user-created promise cycles.
 
 For a separately owned supervisor, use `new TaskSupervisor(scope)` and close it before disposing the borrowed scope. An optional second argument supplies an admission callback. No jobs are persisted or restarted.
 
@@ -358,20 +362,26 @@ await execute(
 );
 ```
 
+## Pitfalls
+
+Execution scope ownership, background isolation, startup hooks, and event failure
+reporting behave deliberately but surprise callers. Each contract, its cause in source,
+and its fix are collected in [docs/pitfalls.md](docs/pitfalls.md).
+
 ## API overview
 
-| Area             | Exports                                                                                  |
-| ---------------- | ---------------------------------------------------------------------------------------- |
-| Execution        | `execute`, `begin`, `runWith`, `currentState`, `peekState`, `currentAttachment`          |
-| Context          | `contextKey`, `provide`, `use`, `withContext`, `ContextFrame`                            |
-| Concurrency      | `Task`, `TaskGroup`, `fork`, `forkGroup`                                                 |
-| Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`, `Cancelable`, `call`, `CallContext` |
-| DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`             |
-| Lifecycle        | `ApplicationLifecycle`, `AppStarted`, `AppClosing`, `AppClosed`                          |
-| Background work  | `TaskSupervisor`, `BackgroundSeed`                                                       |
-| Events           | `EventBus`, `eventKey`                                                                   |
-| Tracing          | `setTracer`, `span`, `Tracer`, `TraceSpan`                                               |
-| Utilities        | `defer`, `combinedError`                                                                 |
+| Area             | Exports                                                                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Execution        | `execute`, `begin`, `runWith`, `currentState`, `peekState`, `currentAttachment`                                                                   |
+| Context          | `contextKey`, `provide`, `use`, `hasContext`, `requireContext`, `MissingContextError`, `withContext`, `ContextFrame`                              |
+| Concurrency      | `Task`, `TaskGroup`, `fork`, `forkGroup`                                                                                                          |
+| Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`, `Cancelable`, `call`, `CallContext`                                                          |
+| DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`, `StartupContext`                                                    |
+| Lifecycle        | `ApplicationLifecycle`, `ApplicationLifecycleOptions`, `AppStarted`, `AppClosing`, `AppClosed`, `LifecycleStateError`, `LifecycleDependencyError` |
+| Background work  | `TaskSupervisor`, `BackgroundSeed`                                                                                                                |
+| Events           | `EventBus`, `eventKey`, `EventBusOptions`, `EventErrorContext`                                                                                    |
+| Tracing          | `setTracer`, `span`, `Tracer`, `TraceSpan`                                                                                                        |
+| Utilities        | `defer`, `combinedError`                                                                                                                          |
 
 ## Development
 

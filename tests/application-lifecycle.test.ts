@@ -5,6 +5,7 @@ import {
   AppStarted,
   ApplicationLifecycle,
   EventBus,
+  LifecycleDependencyError,
   Scope,
   contextKey,
   execute,
@@ -358,17 +359,17 @@ test("producer notifications finish before singleton disposal and AppClosed deli
   ]);
 });
 
-test("an async started observer can initiate shutdown without racing startup or its own disposal", async () => {
+test("an async started observer cannot join shutdown while external shutdown still joins its disposal", async () => {
   const app = new ApplicationLifecycle();
   const release = Promise.withResolvers<void>();
   const order: string[] = [];
-  let reentrant: Promise<void> | undefined;
+  let reentrant: Promise<unknown> | undefined;
   app.scope.defer(() => {
     order.push("disposed");
   });
   app.events.onAsync(AppStarted, async () => {
     order.push("started");
-    reentrant = app.close();
+    reentrant = app.close().catch((error: unknown) => error);
     await release.promise;
     order.push("observer:finished");
   });
@@ -379,7 +380,7 @@ test("an async started observer can initiate shutdown without racing startup or 
   await app.start();
   const closing = app.close();
   try {
-    expect(reentrant).toBe(closing);
+    expect(await reentrant).toBeInstanceOf(LifecycleDependencyError);
     expect(order).toEqual(["started", "closing"]);
   } finally {
     release.resolve();
