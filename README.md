@@ -241,6 +241,18 @@ console.log(database.url);
 
 A `Scope` caches each resolved token once. Child scopes can resolve providers from their ancestors while retaining ownership of resources created locally. Cleanup runs in LIFO order. Objects implementing `Symbol.asyncDispose`, `Symbol.dispose`, or `ScopeObject.onClose()` are adopted automatically; conflicting disposal protocols are rejected rather than invoked ambiguously.
 
+For per-operation scopes, `disposeSync()` closes an untouched scope immediately without a promise or disposal microtask. It returns `false` without changing state if resource lifecycle or cached instances exist; use the ordinary asynchronous barrier in that case:
+
+```ts
+if (!scope.disposeSync()) {
+  await scope[Symbol.asyncDispose]();
+}
+```
+
+Successful synchronous disposal clears unused providers and rejects subsequent acquisition with `ScopeClosedError`. It is idempotent, and later asynchronous disposal resolves without creating a resource lifecycle. Scopes that used the asynchronous path keep that path, including its cached cleanup failure. `execute()` and application background tasks use this fast path for their owned scopes; resource-owning scopes retain their existing LIFO cleanup and error behavior.
+
+Closing a parent does not dispose its independently owned children. Existing children can still acquire local resources and be disposed after either parent-disposal path; providers on the closed parent remain inaccessible. Resource disposal ownership stays shared across the tree, so surviving siblings cannot adopt the same resource for duplicate cleanup.
+
 Use `scoped()` when a resource should be acquired once in the active scope without registering a provider first. Use `onStart()` during managed construction to register dependency-ordered initialization and `onDispose()` to register LIFO cleanup.
 
 `inject()`, `scoped()`, `onStart()`, and `onDispose()` resolve against the scope that constructs the surrounding resource, and otherwise against the current execution's scope. An execution started from a factory or a startup hook resolves and cleans up in its own scope, not the constructing one.
