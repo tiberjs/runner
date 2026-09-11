@@ -107,6 +107,70 @@ const value = await timeout(1_000, async () => {
 
 `AbortSignal` is cooperative. Code that performs asynchronous work must pass the current signal to cancellable APIs or observe it after awaits and before irreversible effects. Rejections those APIs produce for that cancellation, including Node's `AbortError`, are treated as cancellation rather than failure.
 
+An exact match to the signal reason is cancellation. Otherwise, nested `SuppressedError` and `AggregateError` values count as cancellation only when every leaf matches that signal's cancellation. Independent cleanup errors remain failures even when a wrapper's `cause` matches; empty or cyclic compounds are not sufficient evidence of cancellation.
+
+### Binding native cancellation
+
+Extend `Cancelable` when an operation already has a native cancellation capability. The only abstract method is `cancel(reason)`; construction does not access Runner or register listeners. Call `operation.cancelable()` explicitly to bind the fully constructed instance to the current execution signal.
+
+```ts
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { Cancelable } from "@tiberjs/runner";
+
+class Command extends Cancelable {
+  constructor(readonly child: ChildProcess) {
+    super();
+  }
+
+  cancel(_reason: unknown): void {
+    this.child.kill("SIGTERM");
+  }
+}
+
+// Invoke inside a Runner execution.
+async function runCommand(command: string, args: string[]) {
+  const child = spawn(command, args, { stdio: "ignore" });
+  const closed = once(child, "close");
+  const operation = new Command(child);
+  await using registration = operation.cancelable();
+  return await closed;
+}
+```
+
+`cancelable(signal)` also works outside Runner. Omitting the signal requires an active execution. An already-aborted explicit signal invokes `cancel(reason)` immediately. Each instance permits one registration at a time; another is allowed after disposal finishes, including failed disposal.
+
+The returned registration is a **separate `AsyncDisposable`**, not the operation:
+
+- Disposal disconnects the listener and joins any cancellation action already invoked. It never requests cancellation itself and never calls the operation's disposer.
+- A derived `[Symbol.asyncDispose]()`, managed `onDispose()`, and method-local `defer()` keep their own lifetimes. Register each resource's cleanup separately.
+- Cancellation, including lazy thenable execution, runs in the registration's execution context, not the context that calls `abort()`. Explicit registration outside Runner does not borrow the aborting execution's context.
+- Cancellation failures surface from registration disposal with their original identity and cause. If the body also fails, `await using` preserves both through `SuppressedError`.
+- Do not await the registration's disposal inside its own `cancel()`; that would wait on itself.
+
+For a function rather than a class, `call(({ onCancel }) => ...)` uses the same binding machinery:
+
+```ts
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { call } from "@tiberjs/runner";
+
+function runCommand(command: string, args: string[]) {
+  return call(({ onCancel }) => {
+    const child = spawn(command, args, { stdio: "ignore" });
+    const closed = once(child, "close");
+    onCancel(() => {
+      child.kill("SIGTERM");
+    });
+    return closed;
+  });
+}
+```
+
+`call()` requires an active execution and does not start its handler when already cancelled. Register each native cancellation action with `onCancel()`; an action registered after an abort during setup is invoked immediately. Multiple actions start in registration order without waiting for one another, and disposal joins all of them. Multiple cancellation failures form an `AggregateError`. A retained `onCancel` function cannot register actions after the call closes.
+
+Both forms await invoked cancellation actions, but neither can force an API without a real cancellation mechanism to stop. Keep awaiting the native operation's actual completion: a class registration does not own its result or change how it settles. `call()` awaits the handler and cancellation cleanup before returning, and rejects with the execution's cancellation reason when otherwise-successful work was cancelled. It does not race the result, fork a task, or create a resource scope.
+
 ## Execution context
 
 Create typed identities with `contextKey()`, bind values with `provide()`, and read them with `use()`. `execute()` accepts bindings directly, so application code does not need to construct a frame.
@@ -296,18 +360,18 @@ await execute(
 
 ## API overview
 
-| Area             | Exports                                                                         |
-| ---------------- | ------------------------------------------------------------------------------- |
-| Execution        | `execute`, `begin`, `runWith`, `currentState`, `peekState`, `currentAttachment` |
-| Context          | `contextKey`, `provide`, `use`, `withContext`, `ContextFrame`                   |
-| Concurrency      | `Task`, `TaskGroup`, `fork`, `forkGroup`                                        |
-| Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`                             |
-| DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`    |
-| Lifecycle        | `ApplicationLifecycle`, `AppStarted`, `AppClosing`, `AppClosed`                 |
-| Background work  | `TaskSupervisor`, `BackgroundSeed`                                              |
-| Events           | `EventBus`, `eventKey`                                                          |
-| Tracing          | `setTracer`, `span`, `Tracer`, `TraceSpan`                                      |
-| Utilities        | `defer`, `combinedError`                                                        |
+| Area             | Exports                                                                                  |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| Execution        | `execute`, `begin`, `runWith`, `currentState`, `peekState`, `currentAttachment`          |
+| Context          | `contextKey`, `provide`, `use`, `withContext`, `ContextFrame`                            |
+| Concurrency      | `Task`, `TaskGroup`, `fork`, `forkGroup`                                                 |
+| Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`, `Cancelable`, `call`, `CallContext` |
+| DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`             |
+| Lifecycle        | `ApplicationLifecycle`, `AppStarted`, `AppClosing`, `AppClosed`                          |
+| Background work  | `TaskSupervisor`, `BackgroundSeed`                                                       |
+| Events           | `EventBus`, `eventKey`                                                                   |
+| Tracing          | `setTracer`, `span`, `Tracer`, `TraceSpan`                                               |
+| Utilities        | `defer`, `combinedError`                                                                 |
 
 ## Development
 

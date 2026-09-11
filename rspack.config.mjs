@@ -37,6 +37,7 @@ export default defineConfig({
         loader: "builtin:swc-loader",
         options: {
           jsc: {
+            externalHelpers: true,
             parser: {
               syntax: "typescript",
             },
