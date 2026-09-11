@@ -1,27 +1,33 @@
 # Working on @tiberjs/runner
 
-`@tiberjs/runner` is the transport-independent execution runtime for TiberJS. It owns immutable execution context, structured tasks, dependency injection, application lifecycle, events, and tracing.
+`@tiberjs/runner` is the transport-independent execution runtime for TiberJS. Its core is Job ownership, optional supervision, declarative task groups, and immutable execution context.
 
 ## Repository boundary
 
-- `src/context/`: immutable context frames and typed keys.
-- `src/runtime/`: execution state, task groups, cancellation, deadlines, forks, defers, and spans.
-- `src/di/`: scopes, tokens, ambient injection, resource startup/disposal, and resolution graphs.
-- `src/events/`: application events and the event bus.
-- `src/lifecycle/`: application startup, drain, and shutdown ownership.
+- `src/job/`: the Job ownership/completion kernel, composed failure storage, cancellation registrations/classification, and deadlines.
+- `src/supervisor/`: Supervisor admission/failure policy, immutable TaskGroup declarations, and composed group planning/execution.
+- `src/execution/`: `execute`, `fork`, and `timeout` entry points plus the ALS bridge between a Job and its call-chain context.
+- `src/execution/context/`: immutable frames, typed keys, execution environment types, and binding access. These are execution-environment values, not Job ownership nodes.
+- `src/errors.ts`: state/dependency errors and failure aggregation.
 - `tests/`: public behavior and lifecycle boundary tests.
 
 Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or optional feature packages. Do not introduce transport messages, routes, requests, responses, sockets, status codes, or broker acknowledgements here. `reflect-metadata` is not a runner dependency.
 
 ## Public contracts
 
-- Execution starts through `begin`/`execute`; bindings attach native payloads through the execution state.
-- `TaskGroup` owns child tasks. Await, return, or explicitly attach asynchronous work to an owner.
-- `Scope` owns dependency identity and resources. Startup is dependency ordered; disposal is LIFO and preserves operation plus cleanup failures.
-- `ApplicationLifecycle` owns its scope, event bus, startup, drain callbacks, and close sequence.
+- `Job` is a cold, single-use execution and awaitable lifetime node. It settles only after its body and actual descendants finish.
+- `Supervisor` manages a supplied ordinary Job. It does not create hidden startup, background, or shutdown owners.
+- `Supervisor.start(options)` follows `Job.start(options)` ownership and context rules. Use `{ parent: undefined }` to explicitly select an independent root; Supervisor state is its Job state.
+- Applications own initialization order and error reporting. Do not add readiness handshakes, automatic logging, or reporting callbacks to the execution core.
+- `TaskGroup` is an immutable nested declaration, not a lifetime owner. Submitted leaves belong directly to the Supervisor's Job.
+- `execute()` and `fork()` create real Jobs. There is no separate Task handle or compatibility lifecycle layer.
+- Context frames are independent of ownership. `withContext()` changes the call-chain environment without creating a Job.
+- Compose support state without duplicating ownership: `FailureSet` stores errors, `CancellationBindings` releases registrations, and `GroupRunner` applies declaration policy. None owns a Job lifetime, creates an AbortController, or stores independent completion state.
+- Do not restore DI, EventBus, tracing, or legacy APIs to this core.
 - Context is immutable. Derive it with `provide(...)`; never introduce a mutable request-style bag.
 - Cancellation and deadlines are live state. Recheck them after awaits and before commitment points.
 - Preserve native error identity and `cause`; use `AggregateError` when independent operation and cleanup failures both matter.
+- Cancellation classification accepts the original signal reason or a Node-style `AbortError` with `code: "ABORT_ERR"` and matching `cause`. An ordinary application error remains a failure even when its cause is the cancellation reason.
 
 ## Toolchain
 
@@ -66,7 +72,7 @@ must fail.
 
 - Test public behavior, ownership, transitions, cancellation, cleanup ordering, and simultaneous failures.
 - Observe rejections before triggering cancellation or failure.
-- Keep fake clocks, shared scopes, and global tracer changes isolated.
+- Keep fake clocks and asynchronous test resources isolated.
 - A test must fail for a plausible regression; do not assert private wiring or incidental wording.
 - After a behavioral change run `pnpm format`, `pnpm check`, `pnpm build`, and the relevant tests. Run the full suite for cross-cutting runtime changes.
 - Publishing must use built `dist`; consumers must not depend on repository source conditions.
