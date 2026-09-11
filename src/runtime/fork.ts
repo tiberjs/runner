@@ -1,5 +1,5 @@
 import { combinedError } from "../lifecycle/errors.js";
-import { linkAbort } from "./abort.js";
+import { isCancellation, linkAbort } from "./abort.js";
 import { currentState, runWith } from "./state.js";
 import type { RuntimeState } from "./state.js";
 import { Task, TaskGroup } from "./task-group.js";
@@ -35,7 +35,7 @@ export function fork<T>(fn: () => T | Promise<T>): Task<T> {
       resolve(await fn());
     } catch (error) {
       // Cancellation does not excuse unrelated errors thrown by finalizers.
-      if (!controller.signal.aborted || !Object.is(error, controller.signal.reason)) {
+      if (!isCancellation(error, controller.signal)) {
         group.reportFailure(task, error);
       }
 
@@ -82,10 +82,7 @@ export async function forkGroup<T extends readonly unknown[]>(
     const errors: unknown[] = [];
     for (const task of tasks) {
       const outcome = await task.outcome();
-      if (
-        outcome.status === "rejected" &&
-        (!task.signal.aborted || !Object.is(outcome.reason, task.signal.reason))
-      ) {
+      if (outcome.status === "rejected" && !isCancellation(outcome.reason, task.signal)) {
         errors.push(outcome.reason);
       }
     }
