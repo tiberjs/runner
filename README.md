@@ -195,6 +195,8 @@ Startup hooks run in the application scope without inheriting the initiating req
 
 Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()` and share the emitter's scope. Asynchronous listeners run in bus-owned managed executions joined by `flush()` or `close()`; each delivery owns a child of the bus scope, so a listener resolves application providers, and resources it acquires with `scoped()` or `onDispose()` are released when that delivery ends.
 
+EventBus uses a separate `TaskSupervisor`, not `app.background`. It applies no startup admission gate and drains all admitted deliveries before closing its supervisor, so neither startup notifications nor shutdown notifications are cancelled. Asynchronous listener and per-delivery cleanup failures are reported after delivery settles without rejecting the publisher or delivery barriers; simultaneous failures preserve their original causes in an `AggregateError`.
+
 ### Application-owned background work
 
 Use `app.background.run()` for process-local work that may outlive its submitting request. It waits for application startup and returns an awaitable `Task<T>`; `task.cancel(reason)` cancels only that task.
