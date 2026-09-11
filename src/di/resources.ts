@@ -23,13 +23,18 @@ export interface ScopeObject {
   onClose?(): unknown | Promise<unknown>;
 }
 
+type ResourceOwners = WeakMap<object, ResourceLifecycle | { rejected: unknown }>;
+
+// Surviving children share ownership without initializing a closed parent's lifecycle.
+const ownershipByRoot = new WeakMap<Scope, ResourceOwners>();
+
 /** Startup transactions and LIFO resource ownership; no dependency resolution. */
 export class ResourceLifecycle {
   #startups: Startup[] | undefined;
   #disposers: Cleanup[] | undefined;
   #pendingStartups: Startup[] | undefined;
-  /** Disposal ownership across the whole scope tree; keyed at the root lifecycle. */
-  #ownership: WeakMap<object, ResourceLifecycle | { rejected: unknown }> | undefined;
+  /** Lazily cached ownership shared by every lifecycle in the scope tree. */
+  #ownership: ResourceOwners | undefined;
   #starting: Promise<void> | undefined;
   #closing: Promise<void> | undefined;
   #disposed = false;
@@ -38,13 +43,21 @@ export class ResourceLifecycle {
   constructor(
     private readonly scope: Scope,
     startup: boolean,
-    private readonly parent?: ResourceLifecycle,
+    private readonly root: Scope,
   ) {
     this.#startupPhase = startup ? "collecting" : "disabled";
   }
 
-  get #owners(): WeakMap<object, ResourceLifecycle | { rejected: unknown }> {
-    return this.parent ? this.parent.#owners : (this.#ownership ??= new WeakMap());
+  get #owners(): ResourceOwners {
+    if (!this.#ownership) {
+      let owners = ownershipByRoot.get(this.root);
+      if (!owners) {
+        owners = new WeakMap();
+        ownershipByRoot.set(this.root, owners);
+      }
+      this.#ownership = owners;
+    }
+    return this.#ownership;
   }
 
   get disposed(): boolean {

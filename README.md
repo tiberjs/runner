@@ -251,6 +251,8 @@ if (!scope.disposeSync()) {
 
 Successful synchronous disposal clears unused providers and rejects subsequent acquisition with `ScopeClosedError`. It is idempotent, and later asynchronous disposal resolves without creating a resource lifecycle. Scopes that used the asynchronous path keep that path, including its cached cleanup failure. `execute()` and application background tasks use this fast path for their owned scopes; resource-owning scopes retain their existing LIFO cleanup and error behavior.
 
+Closing a parent does not dispose its independently owned children. Existing children can still acquire local resources and be disposed after either parent-disposal path; providers on the closed parent remain inaccessible. Resource disposal ownership stays shared across the tree, so surviving siblings cannot adopt the same resource for duplicate cleanup.
+
 Use `scoped()` when a resource should be acquired once in the active scope without registering a provider first. Use `onStart()` during managed construction to register dependency-ordered initialization and `onDispose()` to register LIFO cleanup.
 
 `inject()`, `scoped()`, `onStart()`, and `onDispose()` resolve against the scope that constructs the surrounding resource, and otherwise against the current execution's scope. An execution started from a factory or a startup hook resolves and cleans up in its own scope, not the constructing one.

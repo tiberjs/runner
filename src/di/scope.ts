@@ -36,11 +36,7 @@ export class Scope {
   get #resourceLifecycle(): ResourceLifecycle {
     if (!this.#resources) {
       this.#assertNotDisposed();
-      this.#resources = new ResourceLifecycle(
-        this,
-        this.#startup,
-        this.#parent ? this.#parent.#resourceLifecycle : undefined,
-      );
+      this.#resources = new ResourceLifecycle(this, this.#startup, this.#root);
     }
     return this.#resources;
   }

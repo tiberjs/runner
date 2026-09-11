@@ -54,6 +54,103 @@ describe("Scope lifecycle", () => {
     expect(parent.disposeSync()).toBe(true);
   });
 
+  test.each(["sync", "async"] as const)(
+    "children retain local acquisition and cleanup after %s parent disposal",
+    async (mode) => {
+      const parent = new Scope();
+      const child = parent.child();
+      const untouched = parent.child();
+      const Value = token<object>("child-local");
+      const value = {};
+      const order: string[] = [];
+      child.provide(Value, () => {
+        onDispose(() => {
+          order.push("resource");
+        });
+        return value;
+      });
+      if (mode === "sync") {
+        parent.disposeSync();
+      } else {
+        await parent[Symbol.asyncDispose]();
+      }
+
+      expect(child.get(Value)).toBe(value);
+      child.defer(() => {
+        order.push("deferred");
+      });
+      expect(() => parent.get(Value)).toThrow(ScopeClosedError);
+      expect(() => parent.defer(() => {})).toThrow(ScopeClosedError);
+      expect(() => parent.child()).toThrow(ScopeClosedError);
+      expect(() => parent.provide(Value, () => value)).toThrow(ScopeClosedError);
+      await expect(parent.start()).rejects.toBeInstanceOf(ScopeClosedError);
+      expect(parent.resolutionGraph()).toEqual({ nodes: [], edges: [] });
+
+      await untouched[Symbol.asyncDispose]();
+      expect(() => untouched.child()).toThrow(ScopeClosedError);
+      await child[Symbol.asyncDispose]();
+      expect(order).toEqual(["deferred", "resource"]);
+      expect(() => child.get(Value)).toThrow(ScopeClosedError);
+      await parent[Symbol.asyncDispose]();
+    },
+  );
+
+  test("closed ancestors do not split disposal ownership between surviving siblings", async () => {
+    const root = new Scope();
+    const branch = root.child();
+    const first = branch.child();
+    const second = root.child();
+    const Shared = token<object>("shared");
+    const Explicit = token<object>("explicit duplicate");
+    let disposed = 0;
+    const shared = {
+      [Symbol.dispose]() {
+        disposed++;
+      },
+    };
+    expect(branch.disposeSync()).toBe(true);
+    expect(root.disposeSync()).toBe(true);
+
+    expect(first.use(Shared, () => shared)).toBe(shared);
+    expect(second.use(Shared, () => shared)).toBe(shared);
+    expect(() =>
+      second.use(
+        Explicit,
+        () => shared,
+        () => {},
+      ),
+    ).toThrow(ScopeDisposalConflictError);
+    expect(root.disposeSync()).toBe(true);
+    expect(branch.disposeSync()).toBe(true);
+
+    await second[Symbol.asyncDispose]();
+    expect(disposed).toBe(0);
+    await first[Symbol.asyncDispose]();
+    expect(disposed).toBe(1);
+    await Promise.all([root[Symbol.asyncDispose](), branch[Symbol.asyncDispose]()]);
+    expect(disposed).toBe(1);
+  });
+
+  test("a child returned by execute remains independently usable and disposable", async () => {
+    const child = await execute(() => currentScope().child());
+    const Value = token<object>("returned child");
+    const value = {};
+    let disposed = false;
+    expect(
+      child.use(
+        Value,
+        () => value,
+        () => {
+          disposed = true;
+        },
+      ),
+    ).toBe(value);
+    expect(disposed).toBe(false);
+    await child[Symbol.asyncDispose]();
+    expect(disposed).toBe(true);
+    expect(() => child.get(Value)).toThrow(ScopeClosedError);
+  });
+
   test("a synchronous disposal attempt preserves cached instances and resource ownership", async () => {
     const scope = new Scope();
     const Value = token<object>("owned instance");
