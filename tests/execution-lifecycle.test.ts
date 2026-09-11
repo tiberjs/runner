@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { expect, afterEach, test, vi } from "vitest";
 import {
   currentAttachment,
@@ -81,6 +82,29 @@ test("cancellation does not hide a task finalizer failure", async () => {
       });
     }),
   ).rejects.toBe(error);
+});
+
+test("a Node AbortError caused by the task signal is cancellation, not a failure", async () => {
+  await expect(
+    execute(seed(), () => {
+      fork(() => sleep(60_000, undefined, { signal: signal() }));
+    }),
+  ).resolves.toBeUndefined();
+});
+
+test("forkGroup excludes sibling Node AbortErrors caused by its own cancellation", async () => {
+  const failure = new Error("work failed");
+
+  await expect(
+    execute(seed(), () =>
+      forkGroup(
+        () => {
+          throw failure;
+        },
+        () => sleep(60_000, undefined, { signal: signal() }),
+      ),
+    ),
+  ).rejects.toBe(failure);
 });
 
 test("forkGroup cancels and joins descendants before returning", async () => {

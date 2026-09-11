@@ -105,7 +105,7 @@ const value = await timeout(1_000, async () => {
 });
 ```
 
-`AbortSignal` is cooperative. Code that performs asynchronous work must pass the current signal to cancellable APIs or observe it after awaits and before irreversible effects.
+`AbortSignal` is cooperative. Code that performs asynchronous work must pass the current signal to cancellable APIs or observe it after awaits and before irreversible effects. Rejections those APIs produce for that cancellation, including Node's `AbortError`, are treated as cancellation rather than failure.
 
 ## Execution context
 
