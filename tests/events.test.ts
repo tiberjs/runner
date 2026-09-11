@@ -410,8 +410,12 @@ describe("EventBus", () => {
   test("event barriers preserve work and cleanup failures without rejecting the publisher", async () => {
     const bus = new EventBus();
     const key = eventKey<void>("failed delivery");
-    const workFailure = new AggregateError([new Error("work")], "listener failure");
-    const cleanupFailure = new Error("cleanup");
+    const workCause = new Error("work cause");
+    const cleanupCause = new Error("cleanup cause");
+    const workFailure = new AggregateError([new Error("work")], "listener failure", {
+      cause: workCause,
+    });
+    const cleanupFailure = new Error("cleanup", { cause: cleanupCause });
     const report = vi.spyOn(console, "error").mockImplementation(() => {});
     let delivered = false;
     bus.onAsync(key, () => {
@@ -431,7 +435,11 @@ describe("EventBus", () => {
       expect(delivered).toBe(true);
       const failure = report.mock.calls[0]?.[1] as AggregateError;
       expect(failure).toBeInstanceOf(AggregateError);
-      expect(failure.errors).toEqual([workFailure, cleanupFailure]);
+      expect(failure.errors).toHaveLength(2);
+      expect(failure.errors[0]).toBe(workFailure);
+      expect(failure.errors[1]).toBe(cleanupFailure);
+      expect(failure.errors[0].cause).toBe(workCause);
+      expect(failure.errors[1].cause).toBe(cleanupCause);
     } finally {
       report.mockRestore();
     }
