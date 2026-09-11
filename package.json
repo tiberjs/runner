@@ -1,7 +1,7 @@
 {
   "name": "@tiberjs/runner",
-  "version": "0.1.1",
-  "description": "Transport-independent execution runtime: immutable context, structured concurrency, dependency injection, and application lifecycle.",
+  "version": "0.2.0",
+  "description": "Job-based structured concurrency, supervision, declarative task groups, and immutable execution context.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,7 +26,7 @@
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "packageManager": "pnpm@12.3.4",
   "repository": {
