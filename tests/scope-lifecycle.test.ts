@@ -21,6 +21,37 @@ import {
 } from "../src/index.js";
 
 describe("Scope lifecycle", () => {
+  test("reading startup status leaves an empty scope synchronously disposable", async () => {
+    const scope = new Scope(undefined, { startup: true });
+    expect(scope.startupPending).toBe(false);
+    expect(scope.disposeSync()).toBe(true);
+    expect(scope.startupPending).toBe(false);
+    await expect(scope.start()).rejects.toBeInstanceOf(ScopeClosedError);
+  });
+
+  test("the final resource drain closes cleanup admission before its promise settles", async () => {
+    const scope = new Scope();
+    let rejected: unknown;
+    let lateCleanupRan = false;
+    scope.defer(() => {
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          try {
+            scope.defer(() => {
+              lateCleanupRan = true;
+            });
+          } catch (error) {
+            rejected = error;
+          }
+        });
+      });
+    });
+
+    await scope[Symbol.asyncDispose]();
+    expect(rejected).toBeInstanceOf(ScopeClosedError);
+    expect(lateCleanupRan).toBe(false);
+  });
+
   test("synchronous disposal closes untouched children without touching their parent", async () => {
     const parent = new Scope();
     const scope = parent.child();

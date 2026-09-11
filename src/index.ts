@@ -36,7 +36,8 @@ export { token } from "./di/tokens.js";
 export type { Constructor, Factory, InjectionToken, Token } from "./di/tokens.js";
 export type { ResolutionGraph } from "./di/resolution-graph.js";
 
-export { begin, COMPLETED, execute } from "./runtime/execution.js";
+export { begin, execute } from "./runtime/execution.js";
+export { COMPLETED } from "./runtime/managed-execution.js";
 export type { ExecutionSeed } from "./runtime/execution.js";
 export { currentAttachment, currentState, peekState, runWith } from "./runtime/state.js";
 export type { RuntimeState } from "./runtime/state.js";

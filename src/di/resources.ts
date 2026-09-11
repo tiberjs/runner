@@ -1,19 +1,12 @@
-import {
-  assertCanJoin,
-  dependencyFrame,
-  markDependency,
-  releaseDependency,
-  runWithDependency,
-  startupDependency,
-} from "../lifecycle/diagnostics.js";
+import { assertCanJoin, markDependency, startupDependency } from "../lifecycle/diagnostics.js";
 import { combinedError } from "../lifecycle/errors.js";
-import { withoutExecution } from "../runtime/state.js";
 import { activeScope } from "./active-scope.js";
 import { ScopeClosedError, ScopeDisposalConflictError, ScopeStartupError } from "./errors.js";
 import type { Scope } from "./scope.js";
-import { HookStartupContext, type StartupContext } from "./startup-context.js";
+import type { StartupContext } from "./startup-context.js";
 
 type Startup = (context: StartupContext) => void | PromiseLike<void>;
+type StartupRunner = (scope: Scope, hook: Startup) => Promise<void>;
 type Cleanup = () => unknown | Promise<unknown>;
 type StartupPhase = "disabled" | "collecting" | "starting" | "started" | "failed";
 
@@ -36,8 +29,6 @@ export class ResourceLifecycle {
   /** Lazily cached ownership shared by every lifecycle in the scope tree. */
   #ownership: ResourceOwners | undefined;
   #starting: Promise<void> | undefined;
-  #closing: Promise<void> | undefined;
-  #disposed = false;
   #startupPhase: StartupPhase;
 
   constructor(
@@ -60,34 +51,31 @@ export class ResourceLifecycle {
     return this.#ownership;
   }
 
-  get disposed(): boolean {
-    return this.#disposed;
-  }
-
   /** Queued initialization exists and no startup barrier has run yet. */
   get startupPending(): boolean {
     return this.#startupPhase === "collecting" && (this.#startups?.length ?? 0) > 0;
   }
 
-  assertOpen(): void {
-    if (this.#closing) {
-      throw new ScopeClosedError(this.#disposed ? "disposed" : "closing");
+  #assertOpen(): void {
+    const state = this.scope.lifecycleState;
+    if (state !== "open") {
+      throw new ScopeClosedError(state);
     }
   }
 
-  assertNotDisposed(): void {
-    if (this.#disposed) {
+  #assertNotDisposed(): void {
+    if (this.scope.lifecycleState === "disposed") {
       throw new ScopeClosedError("disposed");
     }
   }
 
   defer(cleanup: Cleanup): void {
-    this.assertNotDisposed();
+    this.#assertNotDisposed();
     (this.#disposers ??= []).push(cleanup);
   }
 
   addStartup(callback: Startup): void {
-    this.assertOpen();
+    this.#assertOpen();
     if (this.#startupPhase !== "collecting" && this.#startupPhase !== "starting") {
       throw new ScopeStartupError(this.#startupPhase);
     }
@@ -104,7 +92,7 @@ export class ResourceLifecycle {
       this.#adopt(value, dispose);
 
       if (this.#pendingStartups.length > 0) {
-        this.assertOpen();
+        this.#assertOpen();
         // A running startup callback would use this resource before its own
         // initialization; only construction-time resolution orders correctly.
         if (this.#startupPhase === "starting" && !parentStartups) {
@@ -122,7 +110,7 @@ export class ResourceLifecycle {
 
   /** Close startup admission without an asynchronous barrier only when nothing is pending. */
   sealStartup(): void {
-    this.assertOpen();
+    this.#assertOpen();
     if (this.#startupPhase === "disabled" || this.#startupPhase === "started") {
       return;
     }
@@ -135,17 +123,7 @@ export class ResourceLifecycle {
     this.#startupPhase = "started";
   }
 
-  start(): Promise<void> {
-    if (this.#startupPhase === "starting") {
-      try {
-        assertCanJoin(startupDependency(this.scope), "start", "Scope");
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
-    if (this.#closing) {
-      return Promise.reject(new ScopeClosedError(this.#disposed ? "disposed" : "closing"));
-    }
+  start(runHook: StartupRunner): Promise<void> {
     if (this.#starting) {
       return this.#starting;
     }
@@ -160,54 +138,23 @@ export class ResourceLifecycle {
     this.#starting = promise;
     markDependency(promise, startupDependency(this.scope));
     this.#startupPhase = "starting";
-    void this.#runStartups().then(resolve, reject);
+    void this.#runStartups(runHook).then(resolve, reject);
 
     return promise;
   }
 
-  /** Check before the Scope wrapper commits its disposal promise or clears storage. */
-  assertCanClose(): void {
+  /** Check self-joins before the scope commits admission or a closing promise. */
+  assertCanJoinStartup(operation: string): void {
     if (this.#startupPhase === "starting") {
-      assertCanJoin(startupDependency(this.scope), "asyncDispose", "Scope");
+      assertCanJoin(startupDependency(this.scope), operation, "Scope");
     }
   }
 
-  close(): Promise<void> {
-    try {
-      this.assertCanClose();
-    } catch (error) {
-      return Promise.reject(error);
-    }
-    if (this.#closing) {
-      return this.#closing;
-    }
-
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    this.#closing = promise;
-    void this.#dispose().then(resolve, reject);
-
-    return promise;
-  }
-
-  async #runStartups(): Promise<void> {
+  async #runStartups(runHook: StartupRunner): Promise<void> {
     let index = 0;
     try {
-      while (!this.#closing && index < (this.#startups?.length ?? 0)) {
-        const hook = this.#startups![index++]!;
-        const context = new HookStartupContext(this.scope);
-        const frame = dependencyFrame(startupDependency(this.scope));
-        try {
-          await withoutExecution(() =>
-            runWithDependency(frame, () =>
-              activeScope.run(this.scope, async () => {
-                await hook(context);
-              }),
-            ),
-          );
-        } finally {
-          context.release();
-          releaseDependency(frame);
-        }
+      while (this.scope.lifecycleState === "open" && index < (this.#startups?.length ?? 0)) {
+        await runHook(this.scope, this.#startups![index++]!);
       }
       // Seal in the same continuation that observes the drained queue, not a later .then().
       this.#startupPhase = "started";
@@ -219,29 +166,32 @@ export class ResourceLifecycle {
     }
   }
 
-  async #dispose(): Promise<void> {
+  /** Drain once under the scope's published close barrier, then retire its admission. */
+  async dispose(finalize: () => void): Promise<void> {
     const errors: unknown[] = [];
     try {
-      // Yield past a synchronous factory that initiated disposal before returning its resource.
-      await this.#starting;
-    } catch (error) {
-      errors.push(error);
-    }
-
-    while (this.#disposers?.length) {
       try {
-        await activeScope.run(this.scope, this.#disposers.pop()!);
+        // Yield past a synchronous factory that initiated disposal before returning its resource.
+        await this.#starting;
       } catch (error) {
         errors.push(error);
       }
-    }
 
-    this.#disposed = true;
-    this.#startups = undefined;
-    this.#disposers = undefined;
+      while (this.#disposers?.length) {
+        try {
+          await activeScope.run(this.scope, this.#disposers.pop()!);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
 
-    if (errors.length) {
-      throw combinedError(errors, "Errors during disposal.");
+      if (errors.length) {
+        throw combinedError(errors, "Errors during disposal.");
+      }
+    } finally {
+      this.#startups = undefined;
+      this.#disposers = undefined;
+      finalize();
     }
   }
 
@@ -259,7 +209,7 @@ export class ResourceLifecycle {
       if (!(owner instanceof ResourceLifecycle)) {
         throw owner.rejected;
       }
-      if (!owner.#disposed) {
+      if (owner.scope.lifecycleState !== "disposed") {
         if (explicitDispose) {
           throw new ScopeDisposalConflictError("already-owned");
         }

@@ -3,6 +3,9 @@ import { ResourceLifecycle } from "./resources.js";
 import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
 import type { Factory, InjectionToken } from "./tokens.js";
 import type { StartupContext } from "./startup-context.js";
+import { runStartupHook } from "../lifecycle/startup.js";
+
+type ScopeState = "open" | "closing" | "disposed";
 
 export interface ScopeOptions {
   /** The owner promises to await start() before admitting work. Never inherited. */
@@ -24,13 +27,18 @@ export class Scope {
   #factories: Map<InjectionToken<unknown>, Factory<unknown>> | undefined;
   #resolving: Set<InjectionToken<unknown>> | undefined;
   #disposePromise: Promise<void> | undefined;
-  #disposed = false;
+  #state: ScopeState = "open";
   readonly #startup: boolean;
 
   constructor(parent?: Scope, options?: ScopeOptions) {
     this.#parent = parent;
     this.#root = parent ? parent.#root : this;
     this.#startup = options?.startup === true;
+  }
+
+  /** @internal Resource transactions observe the scope's single admission state. */
+  get lifecycleState(): ScopeState {
+    return this.#state;
   }
 
   get #resourceLifecycle(): ResourceLifecycle {
@@ -42,7 +50,7 @@ export class Scope {
   }
 
   get #resolutionTracker(): ResolutionTracker | undefined {
-    if (this.#root.#disposed || this.#root.#resources?.disposed) {
+    if (this.#root.#state === "disposed") {
       return undefined;
     }
 
@@ -127,15 +135,18 @@ export class Scope {
   }
 
   start(): Promise<void> {
-    if (this.#disposed && !this.#resources) {
-      return Promise.reject(new ScopeClosedError("disposed"));
+    try {
+      this.#resources?.assertCanJoinStartup("start");
+      this.#assertOpen();
+      return this.#resourceLifecycle.start(runStartupHook);
+    } catch (error) {
+      return Promise.reject(error);
     }
-    return this.#resourceLifecycle.start();
   }
 
   /** Whether resolved resources queued initialization that only start() can run. */
   get startupPending(): boolean {
-    return !this.#disposed && this.#resourceLifecycle.startupPending;
+    return this.#resources?.startupPending ?? false;
   }
 
   /** Seal synchronous admission; pending hooks require awaiting start() instead. */
@@ -152,7 +163,7 @@ export class Scope {
     if (this.#resources || this.#instances) {
       return false;
     }
-    if (!this.#disposed) {
+    if (this.#state !== "disposed") {
       this.#clearResolution();
     }
     return true;
@@ -160,41 +171,41 @@ export class Scope {
 
   /** Close acquisition synchronously, then clear resolution storage after teardown. */
   [Symbol.asyncDispose](): Promise<void> {
-    if (this.#disposed && !this.#resources) {
-      return (this.#disposePromise ??= Promise.resolve());
-    }
     try {
-      this.#resourceLifecycle.assertCanClose();
+      this.#resources?.assertCanJoinStartup("asyncDispose");
     } catch (error) {
       return Promise.reject(error);
     }
     if (this.#disposePromise) {
       return this.#disposePromise;
     }
+    if (this.disposeSync()) {
+      return (this.#disposePromise = Promise.resolve());
+    }
 
-    this.#disposePromise = this.#resourceLifecycle.close().finally(() => {
-      this.#clearResolution();
-    });
-
-    return this.#disposePromise;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    this.#disposePromise = promise;
+    this.#state = "closing";
+    // A materialized instance always has a resource lifecycle. Its final drain
+    // closes admission before resolving, so late cleanup cannot be orphaned.
+    void this.#resources!.dispose(() => this.#clearResolution()).then(resolve, reject);
+    return promise;
   }
 
   #assertNotDisposed(): void {
-    if (this.#disposed) {
+    if (this.#state === "disposed") {
       throw new ScopeClosedError("disposed");
     }
-    this.#resources?.assertNotDisposed();
   }
 
   #assertOpen(): void {
-    if (this.#disposed) {
-      throw new ScopeClosedError("disposed");
+    if (this.#state !== "open") {
+      throw new ScopeClosedError(this.#state);
     }
-    this.#resources?.assertOpen();
   }
 
   #clearResolution(): void {
-    this.#disposed = true;
+    this.#state = "disposed";
     this.#instances = undefined;
     this.#factories = undefined;
     this.#resolving = undefined;

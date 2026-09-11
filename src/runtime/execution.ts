@@ -1,11 +1,8 @@
 import { ContextFrame } from "../context/frame.js";
 import type { ContextEntry } from "../context/key.js";
-import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
-import { combinedError } from "../lifecycle/errors.js";
-import { runWith } from "./state.js";
+import { createExecutionState, runExecution } from "./managed-execution.js";
 import type { RuntimeState } from "./state.js";
-import { TaskGroup } from "./task-group.js";
 
 /**
  * Inputs supplied by a transport when starting an execution.
@@ -34,9 +31,6 @@ export type ExecutionSeed = {
     }
 );
 
-/** Reason used to close a TaskGroup after its execution completes normally. */
-export const COMPLETED = new DOMException("Execution completed", "AbortError");
-
 function materializeValues(values: ExecutionSeed["values"]): ContextFrame {
   if (values === undefined) {
     return ContextFrame.empty;
@@ -60,12 +54,11 @@ function createState(
   const deadline = seed.deadline;
   const attachment = seed.attachment;
 
-  return {
-    context: { values, signal, deadline },
-    tasks: new TaskGroup(),
-    scope: scope ?? parentScope?.child() ?? new Scope(),
+  return createExecutionState(
+    scope ?? parentScope?.child() ?? new Scope(),
+    { values, signal, deadline },
     attachment,
-  };
+  );
 }
 
 /**
@@ -89,52 +82,23 @@ type ExecutionHandler<T> = () => T | Promise<T>;
  */
 export function execute<T>(handler: ExecutionHandler<T>): Promise<T>;
 export function execute<T>(seed: ExecutionSeed, handler: ExecutionHandler<T>): Promise<T>;
-export async function execute<T>(
+export function execute<T>(
   seedOrHandler: ExecutionSeed | ExecutionHandler<T>,
   suppliedHandler?: ExecutionHandler<T>,
 ): Promise<T> {
-  const handler = typeof seedOrHandler === "function" ? seedOrHandler : suppliedHandler;
-  if (typeof handler !== "function") {
-    throw new TypeError("execute() requires a handler.");
-  }
-
-  const seed = typeof seedOrHandler === "function" ? {} : seedOrHandler;
-  // Snapshot ownership once: accessors must not change which scope is disposed.
-  const scope = seed.scope;
-  const parentScope = seed.parentScope;
-  const state = createState(seed, scope, parentScope);
-  const executionSignal = state.context.signal;
-  const ownsScope = scope === undefined;
-  let errors: unknown[] | undefined;
-  let result!: T;
-
   try {
-    executionSignal.throwIfAborted();
-    // This execution resolves in its own scope, not in the one that started it.
-    result = await activeScope.exit(() => runWith(state, async () => handler()));
-    executionSignal.throwIfAborted();
-  } catch (error) {
-    (errors ??= []).push(error);
-  }
-
-  await state.tasks.close(errors ? errors[0] : COMPLETED);
-  if (state.tasks.failed) {
-    (errors ??= []).push(state.tasks.failure);
-  }
-
-  if (ownsScope) {
-    try {
-      if (!state.scope.disposeSync()) {
-        await activeScope.exit(() => runWith(state, () => state.scope[Symbol.asyncDispose]()));
-      }
-    } catch (error) {
-      (errors ??= []).push(error);
+    const handler = typeof seedOrHandler === "function" ? seedOrHandler : suppliedHandler;
+    if (typeof handler !== "function") {
+      throw new TypeError("execute() requires a handler.");
     }
-  }
 
-  if (errors) {
-    throw combinedError(errors, "Execution and cleanup failed.");
+    const seed = typeof seedOrHandler === "function" ? {} : seedOrHandler;
+    // Snapshot ownership once: accessors must not change which scope is disposed.
+    const scope = seed.scope;
+    const parentScope = seed.parentScope;
+    const state = createState(seed, scope, parentScope);
+    return runExecution(state, handler, scope === undefined);
+  } catch (error) {
+    return Promise.reject(error);
   }
-
-  return result;
 }

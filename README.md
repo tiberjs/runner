@@ -249,7 +249,7 @@ if (!scope.disposeSync()) {
 }
 ```
 
-Successful synchronous disposal clears unused providers and rejects subsequent acquisition with `ScopeClosedError`. It is idempotent, and later asynchronous disposal resolves without creating a resource lifecycle. Scopes that used the asynchronous path keep that path, including its cached cleanup failure. `execute()` and application background tasks use this fast path for their owned scopes; resource-owning scopes retain their existing LIFO cleanup and error behavior.
+Successful synchronous disposal clears unused providers and rejects subsequent acquisition with `ScopeClosedError`. It is idempotent, and later asynchronous disposal resolves without creating a resource lifecycle. Asynchronous disposal of an untouched scope uses the same immediate close path. Scopes with resource lifecycles retain their asynchronous barrier, including its cached cleanup failure. Reading `startupPending` does not initialize a lifecycle or change eligibility for synchronous disposal. `execute()` and application background tasks share the same execution-owned cleanup path.
 
 Closing a parent does not dispose its independently owned children. Existing children can still acquire local resources and be disposed after either parent-disposal path; providers on the closed parent remain inaccessible. Resource disposal ownership stays shared across the tree, so surviving siblings cannot adopt the same resource for duplicate cleanup.
 
@@ -400,3 +400,16 @@ pnpm pack
 ```
 
 `pnpm build` creates an ESM bundle with Rspack and emits TypeScript declarations into `dist/`. `pnpm pack` is the final check for the npm artifact.
+
+### Internal ownership boundaries
+
+| Module                         | Responsibility                                                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `di/scope.ts`                  | Provider resolution, authoritative open/closing/disposed state, one close promise, and resolution-storage release.         |
+| `di/resources.ts`              | Resource adoption, startup transactions, and LIFO draining; observes scope state rather than owning another closing state. |
+| `lifecycle/startup.ts`         | Composes hook isolation, dependency tracking, and explicit managed warmup at `Scope.start()`.                              |
+| `runtime/execution.ts`         | Validates seeds and selects a borrowed scope or creates an owned scope.                                                    |
+| `runtime/managed-execution.ts` | Runs prepared execution state, joins tasks, and performs owned cleanup without importing the Scope constructor.            |
+| `lifecycle/task-supervisor.ts` | Owns admission and background tasks; delegates per-task scope ownership to `execute({ parentScope })`.                     |
+
+Resource draining retires scope admission synchronously before settling its promise, so cleanup registered after the last drain cannot be accepted and lost. Root-shared resource ownership remains independent of parent admission. Foreground and background executions use the same failure aggregation, preserving original handler, descendant, and cleanup errors.

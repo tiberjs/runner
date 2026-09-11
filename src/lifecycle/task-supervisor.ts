@@ -6,7 +6,6 @@ import { begin, execute } from "../runtime/execution.js";
 import { fork } from "../runtime/fork.js";
 import { currentState, runWith, type RuntimeState } from "../runtime/state.js";
 import type { Task } from "../runtime/task-group.js";
-import { combinedError } from "./errors.js";
 import { LifecycleStateError, setWaitingFor, withoutDependencies } from "./diagnostics.js";
 
 /** Only explicitly supplied values cross into a background execution. */
@@ -76,34 +75,7 @@ export class TaskSupervisor implements AsyncDisposable {
             }
             signal.throwIfAborted();
 
-            const scope = this.scope.child();
-            let state: RuntimeState | undefined;
-            let result!: T;
-            let errors: unknown[] | undefined;
-            try {
-              result = await execute({ scope, signal, values }, () => {
-                state = currentState();
-                return handler();
-              });
-            } catch (error) {
-              (errors ??= []).push(error);
-            }
-
-            try {
-              // execute() joins descendants but leaves its supplied scope to us.
-              if (!scope.disposeSync()) {
-                await activeScope.exit(() =>
-                  state
-                    ? runWith(state, () => scope[Symbol.asyncDispose]())
-                    : scope[Symbol.asyncDispose](),
-                );
-              }
-            } catch (error) {
-              (errors ??= []).push(error);
-            }
-            if (errors) {
-              throw combinedError(errors, "Background execution and cleanup failed.");
-            }
+            const result = await execute({ parentScope: this.scope, signal, values }, handler);
             signal.throwIfAborted();
             return result;
           }),

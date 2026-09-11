@@ -34,6 +34,30 @@ function untilAbort(): Promise<void> {
   return promise;
 }
 
+test("background execution preserves simultaneous handler, descendant, and cleanup failures", async () => {
+  await using app = new ApplicationLifecycle();
+  const handlerFailure = new Error("handler", { cause: new Error("native cause") });
+  const descendantFailure = new Error("descendant");
+  const cleanupFailure = new Error("cleanup");
+  const task = app.background.run(() => {
+    onDispose(() => {
+      throw cleanupFailure;
+    });
+    fork(() => {
+      throw descendantFailure;
+    });
+    throw handlerFailure;
+  });
+  const failure = await Promise.resolve(task).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(AggregateError);
+  const errors = (failure as AggregateError).errors;
+  expect(errors).toHaveLength(3);
+  expect(errors).toContain(handlerFailure);
+  expect(errors).toContain(descendantFailure);
+  expect(errors).toContain(cleanupFailure);
+  await app.background.flush();
+});
+
 test("background work survives request cancellation and reads only explicit data and application providers", async () => {
   await using app = new ApplicationLifecycle();
   const Tenant = contextKey<string>("tenant");
