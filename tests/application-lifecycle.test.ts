@@ -5,10 +5,16 @@ import {
   AppStarted,
   ApplicationLifecycle,
   EventBus,
+  Scope,
+  contextKey,
+  execute,
   eventKey,
   inject,
   onDispose,
   onStart,
+  peekState,
+  provide,
+  token,
 } from "../src/index.js";
 
 test("startup is shared, dependency ordered, and services observe the application bus", async () => {
@@ -69,6 +75,45 @@ test("startup is shared, dependency ordered, and services observe the applicatio
     "dispose:service",
     "dispose:dependency",
   ]);
+});
+
+test("startup and started notifications do not expose the initiating execution", async () => {
+  await using app = new ApplicationLifecycle();
+  await using factoryScope = new Scope();
+  const Secret = contextKey<string>("request secret");
+  const Config = token<string>("config");
+  const Kickoff = token<Promise<void>>("start application");
+  const startup = Promise.withResolvers<void>();
+  const seen: unknown[] = [];
+  app.scope.provide(Config, () => "application");
+  factoryScope.provide(Config, () => "factory");
+  factoryScope.provide(Kickoff, () => {
+    const starting = app.start();
+    expect(inject(Config)).toBe("factory");
+    return starting;
+  });
+  app.scope.addStartup(async () => {
+    seen.push(peekState()?.context.values.get(Secret.id));
+    expect(inject(Config)).toBe("application");
+    await startup.promise;
+    seen.push(peekState()?.context.values.get(Secret.id));
+    expect(inject(Config)).toBe("application");
+  });
+  app.events.on(AppStarted, () => {
+    seen.push(peekState()?.context.values.get(Secret.id));
+  });
+
+  let starting!: Promise<void>;
+  try {
+    await execute({ scope: factoryScope, values: [provide(Secret, "private")] }, () => {
+      starting = factoryScope.get(Kickoff);
+    });
+  } finally {
+    startup.resolve();
+  }
+  await starting;
+  expect(seen).toEqual([undefined, undefined, undefined]);
+  expect(app.started).toBe(true);
 });
 
 test("close invokes all drainers while startup is pending and waits before releasing resources", async () => {

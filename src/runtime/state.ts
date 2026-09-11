@@ -23,6 +23,11 @@ export function runWith<T>(state: RuntimeState, fn: () => T): T {
   return storage.run(state, fn);
 }
 
+/** @internal Start application-owned work without retaining a submitting execution. */
+export function withoutExecution<T>(fn: () => T): T {
+  return storage.exit(fn);
+}
+
 export function currentState(): RuntimeState {
   const state = storage.getStore();
   if (!state) {

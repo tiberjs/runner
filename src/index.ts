@@ -4,6 +4,8 @@ export { EventBus, eventKey } from "./events/event-bus.js";
 export type { AsyncEventListener, EventKey, EventListener } from "./events/event-bus.js";
 export { AppClosed, AppClosing, AppStarted } from "./events/application.js";
 export { ApplicationLifecycle } from "./lifecycle/application.js";
+export { TaskSupervisor } from "./lifecycle/task-supervisor.js";
+export type { BackgroundSeed } from "./lifecycle/task-supervisor.js";
 export { combinedError } from "./lifecycle/errors.js";
 
 export { ContextFrame } from "./context/frame.js";
