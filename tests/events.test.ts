@@ -230,6 +230,7 @@ describe("EventBus", () => {
     const key = eventKey<void>("changed");
     const release = Promise.withResolvers<void>();
     const order: string[] = [];
+    const cancellations: boolean[] = [];
     let reentrant: Promise<void> | undefined;
     bus.on(key, () => {
       order.push("first");
@@ -240,6 +241,10 @@ describe("EventBus", () => {
     bus.onAsync(key, async () => {
       order.push("async");
       await release.promise;
+      cancellations.push(signal().aborted);
+      onDispose(() => {
+        cancellations.push(signal().aborted);
+      });
       order.push("finished");
     });
     const offLast = bus.on(key, () => {
@@ -264,6 +269,7 @@ describe("EventBus", () => {
     }
     await closing;
     expect(order).toEqual(["first", "async", "last", "finished"]);
+    expect(cancellations).toEqual([false, false]);
   });
 
   test("async subscription changes and nested emissions use separate membership snapshots", async () => {
@@ -386,8 +392,10 @@ describe("EventBus", () => {
 
     class Emitter {
       constructor() {
-        onStart(() => {
+        onStart(async () => {
           app.events.emit(key, undefined);
+          await app.events.flush();
+          expect(cleanups).toEqual(["delivery"]);
         });
       }
     }
@@ -398,5 +406,34 @@ describe("EventBus", () => {
     expect(deliveryScope).not.toBe(app.scope);
     expect(resolved).toBe(app.scope.get(Registry));
     expect(cleanups).toEqual(["delivery"]);
+  });
+  test("event barriers preserve work and cleanup failures without rejecting the publisher", async () => {
+    const bus = new EventBus();
+    const key = eventKey<void>("failed delivery");
+    const workFailure = new AggregateError([new Error("work")], "listener failure");
+    const cleanupFailure = new Error("cleanup");
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    let delivered = false;
+    bus.onAsync(key, () => {
+      onDispose(() => {
+        throw cleanupFailure;
+      });
+      throw workFailure;
+    });
+    bus.onAsync(key, () => {
+      delivered = true;
+    });
+    try {
+      bus.emit(key, undefined);
+      await bus.flush();
+      await bus.close();
+
+      expect(delivered).toBe(true);
+      const failure = report.mock.calls[0]?.[1] as AggregateError;
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure.errors).toEqual([workFailure, cleanupFailure]);
+    } finally {
+      report.mockRestore();
+    }
   });
 });

@@ -1,7 +1,7 @@
+import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
-import { begin, execute } from "../runtime/execution.js";
-import { fork } from "../runtime/fork.js";
-import { currentState, runWith, type RuntimeState } from "../runtime/state.js";
+import { TaskSupervisor } from "../lifecycle/task-supervisor.js";
+import { withoutExecution } from "../runtime/state.js";
 
 /** A typed event identity. Equal descriptions do not imply equal events. */
 export interface EventKey<T> {
@@ -37,7 +37,7 @@ export class EventBus {
   /** Parent of every delivery scope; owned and disposed by this bus. */
   readonly #deliveries: Scope;
   #listeners: Map<symbol, Set<Subscription>> | undefined;
-  #owner: RuntimeState | undefined;
+  #supervisor: TaskSupervisor | undefined;
   #closing: Promise<void> | undefined;
 
   /**
@@ -93,42 +93,26 @@ export class EventBus {
     const snapshot = [...subscribers];
     let release: (() => void) | undefined;
     if (snapshot.some((subscription) => subscription.async)) {
-      const owner = (this.#owner ??= begin({
-        signal: new AbortController().signal,
-        attachment: undefined,
-        scope: this.#deliveries,
-      }));
+      // Deliveries have no application startup gate: startup itself may emit.
+      const supervisor = (this.#supervisor ??= new TaskSupervisor(this.#deliveries));
       const admitted = Promise.withResolvers<void>();
       release = admitted.resolve;
       // Reserve the whole emission before its first callback. A reentrant close
       // must also join async subscribers later in this already-admitted snapshot.
-      runWith(owner, () => fork(() => admitted.promise));
+      supervisor.run(() => admitted.promise);
     }
 
     try {
       for (const subscription of snapshot) {
         if (subscription.async) {
-          runWith(this.#owner!, () =>
-            fork(async () => {
-              const scope = this.#deliveries.child();
-              try {
-                await execute(
-                  { signal: currentState().context.signal, attachment: undefined, scope },
-                  async () => subscription.listener(event as never),
-                );
-              } catch (error) {
-                // Observe within the owned task: the long-lived bus TaskGroup must
-                // not retain a failed Task for every broken notification sink.
-                reportListenerError(key.description, error);
-              } finally {
-                // execute() leaves a supplied scope to its caller; this one is ours.
-                try {
-                  await scope[Symbol.asyncDispose]();
-                } catch (error) {
-                  reportListenerError(key.description, error);
-                }
-              }
-            }),
+          // Observe outside the emitter context too: a pending diagnostic
+          // callback must not retain the request or its construction scope.
+          void activeScope.exit(() =>
+            withoutExecution(() =>
+              this.#supervisor!
+                .run(async () => subscription.listener(event as never))
+                .then(undefined, (error: unknown) => reportListenerError(key.description, error)),
+            ),
           );
         } else {
           try {
@@ -148,7 +132,7 @@ export class EventBus {
    * cancelling them. Do not await this barrier from a listener it must join.
    */
   async flush(): Promise<void> {
-    await this.#owner?.tasks.join();
+    await this.#supervisor?.flush();
   }
 
   /** Stop admission synchronously, then join deliveries. Idempotent; never cancels. */
@@ -170,9 +154,10 @@ export class EventBus {
 
   async #shutdown(): Promise<void> {
     await this.flush();
-    if (this.#owner) {
-      await this.#owner.tasks.close();
-      this.#owner = undefined;
+    if (this.#supervisor) {
+      // flush() drained every admitted snapshot; close cannot cancel deliveries.
+      await this.#supervisor.close();
+      this.#supervisor = undefined;
     }
 
     await this.#deliveries[Symbol.asyncDispose]();
