@@ -7,7 +7,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   context: root,
   mode: "production",
-  target: "node20",
+  target: "node24",
   externalsType: "module",
   externals: [/^node:/],
   entry: "./src/index.ts",
