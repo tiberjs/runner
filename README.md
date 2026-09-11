@@ -215,7 +215,7 @@ console.log(await task); // "acme"
 
 Each task starts with a fresh cancellation signal and its own child of the application scope. It inherits no caller context, attachment, deadline, or construction scope. Supply context values explicitly; bindings are captured at submission, but their values are not cloned. Closures can still capture request resources—pass the needed data and acquire resources inside the background handler instead.
 
-The returned task settles after its handler, child tasks, and scope cleanup finish. Awaiting the task transfers responsibility for its failure to the caller. Otherwise failures remain retained by the supervisor and reject `flush()` or `close()`; a failed task does not cancel siblings.
+The returned task settles after its handler, child tasks, and scope cleanup finish. Awaiting the task transfers responsibility for its failure to the caller and releases the supervisor's failure record, even after an earlier `flush()` reported it. Otherwise failures remain retained by the supervisor and reject `flush()` or `close()`; a failed task does not cancel siblings.
 
 - `await app.background.flush()` waits without cancelling work and leaves admission open.
 - `await app.background.close()` permanently stops admission, cancels active work, and joins cleanup. `app.close()` does this automatically, before shared resources are disposed.

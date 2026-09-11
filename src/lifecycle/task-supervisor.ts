@@ -48,6 +48,10 @@ export class TaskSupervisor implements AsyncDisposable {
         : entries instanceof ContextFrame
           ? entries
           : ContextFrame.from(entries);
+    // Getters and binding iterators can reenter close() during materialization.
+    if (this.#closing) {
+      throw new Error("Task supervisor is closed.");
+    }
     const owner = (this.#owner ??= begin({ scope: this.scope }));
 
     // Neither a submitting execution nor an active DI construction owns this task.

@@ -19,6 +19,7 @@ export class Task<T> implements PromiseLike<T> {
   private readonly controller: AbortController;
   private readonly outcomePromise: Promise<TaskOutcome<T>>;
   private wasObserved = false;
+  private observationListeners: Set<() => void> | undefined;
 
   constructor(promise: Promise<T>, controller: AbortController) {
     this.promise = promise;
@@ -40,6 +41,13 @@ export class Task<T> implements PromiseLike<T> {
   ): Promise<R1 | R2> {
     // Awaiting/chaining a task means its outcome is owned by the caller.
     this.wasObserved = true;
+    const listeners = this.observationListeners;
+    this.observationListeners = undefined;
+    if (listeners) {
+      for (const listener of listeners) {
+        listener();
+      }
+    }
     return this.promise.then(onfulfilled, onrejected);
   }
 
@@ -51,6 +59,15 @@ export class Task<T> implements PromiseLike<T> {
   /** Whether anyone awaited/chained this task (owns its result/error). */
   get observed(): boolean {
     return this.wasObserved;
+  }
+
+  /** @internal Release retained ownership when this task is first awaited/chained. */
+  onObserved(listener: () => void): void {
+    if (this.wasObserved) {
+      listener();
+      return;
+    }
+    (this.observationListeners ??= new Set()).add(listener);
   }
 
   /** Request cancellation of this task. */
@@ -74,8 +91,7 @@ export class Task<T> implements PromiseLike<T> {
 export class TaskGroup {
   // Avoid allocating task bookkeeping for executions that never fork.
   private tasks: Set<Task<unknown>> | null = null;
-  private failures: Array<{
-    readonly task: Task<unknown>;
+  private failures: Set<{
     readonly reason: unknown;
   }> | null = null;
   private closing = false;
@@ -113,11 +129,19 @@ export class TaskGroup {
 
   /**
    * Record a genuine (non-cancellation) failure from a member task. Called by
-   * {@link fork} at throw time so the classification is race-free. Whether it
-   * surfaces is decided at scope close, based on whether the task was observed.
+   * {@link fork} at throw time so the classification is race-free. Only unobserved
+   * failures are retained; observing a task releases its failure immediately.
    */
   reportFailure(task: Task<unknown>, reason: unknown): void {
-    (this.failures ??= []).push({ task, reason });
+    if (task.observed) {
+      return;
+    }
+    const failures = (this.failures ??= new Set());
+    const failure = { reason };
+    failures.add(failure);
+    task.onObserved(() => {
+      failures.delete(failure);
+    });
     if (this.failureListeners?.size) {
       queueMicrotask(() => {
         if (this.failed) {
@@ -168,16 +192,14 @@ export class TaskGroup {
 
   /** Whether an un-awaited member task failed with a genuine error. */
   get failed(): boolean {
-    return this.failures?.some((failure) => !failure.task.observed) ?? false;
+    return (this.failures?.size ?? 0) > 0;
   }
 
   /** Unobserved failures, preserving every cause when several tasks fail. */
   get failure(): unknown {
     let errors: unknown[] | undefined;
     for (const failure of this.failures ?? []) {
-      if (!failure.task.observed) {
-        (errors ??= []).push(failure.reason);
-      }
+      (errors ??= []).push(failure.reason);
     }
 
     return errors ? combinedError(errors, "Concurrent tasks failed.") : undefined;

@@ -308,6 +308,26 @@ test("awaited task failures belong to their caller rather than application shutd
   await app.close();
 });
 
+test("late observation releases only the handled failure from supervisor barriers", async () => {
+  await using app = new ApplicationLifecycle();
+  const failure = new Error("shared rejection");
+  const first = app.background.run(() => {
+    throw failure;
+  });
+  const second = app.background.run(() => {
+    throw failure;
+  });
+  const initial = await app.background.flush().catch((error: unknown) => error);
+  expect(initial).toBeInstanceOf(AggregateError);
+  expect((initial as AggregateError).errors).toEqual([failure, failure]);
+
+  await expect(Promise.resolve(first)).rejects.toBe(failure);
+  await expect(app.background.flush()).rejects.toBe(failure);
+  await expect(Promise.resolve(second)).rejects.toBe(failure);
+  await app.background.flush();
+  await app.close();
+});
+
 test("background work waits for application startup before accessing providers", async () => {
   await using app = new ApplicationLifecycle();
   const gate = Promise.withResolvers<void>();
@@ -453,5 +473,27 @@ test("unobserved submissions do not multiply the application's startup failure",
   });
   await expect(app.start()).rejects.toBe(failure);
   await expect(app.close()).rejects.toBe(failure);
+  expect(ran).toBe(false);
+});
+
+test("closing during initial seed evaluation prevents the handler from being admitted", async () => {
+  await using scope = new Scope();
+  await using supervisor = new TaskSupervisor(scope);
+  let closing: Promise<void> | undefined;
+  let ran = false;
+  expect(() =>
+    supervisor.run(
+      {
+        get values() {
+          closing = supervisor.close();
+          return [];
+        },
+      },
+      () => {
+        ran = true;
+      },
+    ),
+  ).toThrow();
+  await closing;
   expect(ran).toBe(false);
 });
