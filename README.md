@@ -107,6 +107,8 @@ const value = await timeout(1_000, async () => {
 
 `AbortSignal` is cooperative. Code that performs asynchronous work must pass the current signal to cancellable APIs or observe it after awaits and before irreversible effects. Rejections those APIs produce for that cancellation, including Node's `AbortError`, are treated as cancellation rather than failure.
 
+An exact match to the signal reason is cancellation. Otherwise, nested `SuppressedError` and `AggregateError` values count as cancellation only when every leaf matches that signal's cancellation. Independent cleanup errors remain failures even when a wrapper's `cause` matches; empty or cyclic compounds are not sufficient evidence of cancellation.
+
 ### Binding native cancellation
 
 Extend `Cancelable` when an operation already has a native cancellation capability. The only abstract method is `cancel(reason)`; construction does not access Runner or register listeners. Call `operation.cancelable()` explicitly to bind the fully constructed instance to the current execution signal.
@@ -128,7 +130,7 @@ class Command extends Cancelable {
 
 // Invoke inside a Runner execution.
 async function runCommand(command: string, args: string[]) {
-  const child = spawn(command, args);
+  const child = spawn(command, args, { stdio: "ignore" });
   const closed = once(child, "close");
   const operation = new Command(child);
   await using registration = operation.cancelable();
@@ -142,7 +144,7 @@ The returned registration is a **separate `AsyncDisposable`**, not the operation
 
 - Disposal disconnects the listener and joins any cancellation action already invoked. It never requests cancellation itself and never calls the operation's disposer.
 - A derived `[Symbol.asyncDispose]()`, managed `onDispose()`, and method-local `defer()` keep their own lifetimes. Register each resource's cleanup separately.
-- Cancellation executes in the registration's execution context, not the context that calls `abort()`. Explicit registration outside Runner does not borrow the aborting execution's context.
+- Cancellation, including lazy thenable execution, runs in the registration's execution context, not the context that calls `abort()`. Explicit registration outside Runner does not borrow the aborting execution's context.
 - Cancellation failures surface from registration disposal with their original identity and cause. If the body also fails, `await using` preserves both through `SuppressedError`.
 - Do not await the registration's disposal inside its own `cancel()`; that would wait on itself.
 
@@ -155,7 +157,7 @@ import { call } from "@tiberjs/runner";
 
 function runCommand(command: string, args: string[]) {
   return call(({ onCancel }) => {
-    const child = spawn(command, args);
+    const child = spawn(command, args, { stdio: "ignore" });
     const closed = once(child, "close");
     onCancel(() => {
       child.kill("SIGTERM");

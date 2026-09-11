@@ -135,13 +135,17 @@ class CancellationBinding implements AsyncDisposable {
         (this.#pending ??= []).push(promise);
         try {
           // Reserve completion before user code can dispose this registration.
-          const result = this.#state
-            ? runWith(this.#state, () => handler(this.#reason))
-            : handler(this.#reason);
+          const invoke = () => {
+            const result = handler(this.#reason);
+            // Assimilation can execute lazy thenable code, so start it in the
+            // registration context as well. Observe completion outside it.
+            return result === undefined ? undefined : Promise.resolve(result);
+          };
+          const result = this.#state ? runWith(this.#state, invoke) : invoke();
           if (result === undefined) {
             resolve();
           } else {
-            void Promise.resolve(result).then(resolve, (error: unknown) => {
+            void result.then(resolve, (error: unknown) => {
               (this.#errors ??= []).push(error);
               resolve();
             });

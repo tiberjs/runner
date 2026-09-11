@@ -64,6 +64,70 @@ test("implicit cancellation uses the registration context rather than the aborti
   expect(seen).toEqual([reason, "owner", controller.signal]);
 });
 
+test("lazy class cancellation and its continuation use the registration context", async () => {
+  const Tenant = contextKey<string>("tenant");
+  const controller = new AbortController();
+  const seen: (string | undefined)[] = [];
+  class Operation extends Cancelable {
+    cancel(): PromiseLike<void> {
+      return {
+        // oxlint-disable-next-line unicorn/no-thenable -- Deliberately exercise the PromiseLike cancellation contract, as Task does.
+        then(resolve, reject) {
+          seen.push(use(Tenant));
+          return Promise.resolve()
+            .then(() => {
+              seen.push(use(Tenant));
+            })
+            .then(resolve, reject);
+        },
+      };
+    }
+  }
+  await execute({ values: [provide(Tenant, "owner")] }, async () => {
+    await using _registration = new Operation().cancelable(controller.signal);
+    await execute({ values: [provide(Tenant, "abort caller")] }, () => controller.abort());
+  });
+  expect(seen).toEqual(["owner", "owner"]);
+});
+
+test("functional cancellation assimilates nested thenables in the registration context", async () => {
+  const Tenant = contextKey<string>("tenant");
+  const controller = new AbortController();
+  const entered = Promise.withResolvers<void>();
+  const native = Promise.withResolvers<void>();
+  const reason = new Error("stop native operation");
+  const seen: (string | undefined)[] = [];
+  const result = execute({ signal: controller.signal, values: [provide(Tenant, "owner")] }, () =>
+    call(({ onCancel }) => {
+      onCancel(() => ({
+        // oxlint-disable-next-line unicorn/no-thenable -- Cancellation must assimilate this lazy PromiseLike in its owner's context.
+        then(resolve, reject) {
+          seen.push(use(Tenant));
+          const inner: PromiseLike<void> = {
+            // oxlint-disable-next-line unicorn/no-thenable -- Nested assimilation must retain the same execution context.
+            then(innerResolve, innerReject) {
+              seen.push(use(Tenant));
+              native.resolve();
+              return Promise.resolve().then(innerResolve, innerReject);
+            },
+          };
+          return Promise.resolve(inner).then(resolve, reject);
+        },
+      }));
+      entered.resolve();
+      return native.promise;
+    }),
+  ).catch((error: unknown) => error);
+  await entered.promise;
+  try {
+    await execute({ values: [provide(Tenant, "abort caller")] }, () => controller.abort(reason));
+  } finally {
+    native.resolve();
+  }
+  expect(await result).toBe(reason);
+  expect(seen).toEqual(["owner", "owner"]);
+});
+
 test("normal unbinding preserves inner defer and derived disposal without requesting cancellation", async () => {
   const controller = new AbortController();
   const order: string[] = [];
