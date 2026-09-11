@@ -191,6 +191,8 @@ Use `scoped()` when a resource should be acquired once in the active scope witho
 - `close()` stops admission, cancels background work, emits `AppClosing`, joins producers and background cleanup, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
 - `close()` is idempotent, and `ApplicationLifecycle` implements `AsyncDisposable`.
 
+Startup hooks run in the application scope without inheriting the initiating request, task, or construction context; `AppStarted` is emitted outside that caller context too. Explicit `start()` and startup triggered by `admit()` have the same isolation. Startup does not implicitly create a managed execution: a hook that needs `signal()` or `fork()` must start and await an explicit `execute()` (pass `{ scope: app.scope }` to use application providers). Cancelling an individual background task does not cancel shared initialization.
+
 Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()` and share the emitter's scope. Asynchronous listeners run in bus-owned managed executions joined by `flush()` or `close()`; each delivery owns a child of the bus scope, so a listener resolves application providers, and resources it acquires with `scoped()` or `onDispose()` are released when that delivery ends.
 
 ### Application-owned background work

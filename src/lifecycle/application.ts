@@ -1,6 +1,8 @@
+import { activeScope } from "../di/active-scope.js";
 import { Scope } from "../di/scope.js";
 import { AppClosed, AppClosing, AppStarted } from "../events/application.js";
 import { EventBus } from "../events/event-bus.js";
+import { withoutExecution } from "../runtime/state.js";
 import { combinedError } from "./errors.js";
 import { TaskSupervisor } from "./task-supervisor.js";
 
@@ -57,18 +59,24 @@ export class ApplicationLifecycle implements AsyncDisposable {
       return this.#starting;
     }
 
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    this.#starting = promise;
-    void this.scope.start().then(() => {
-      if (!this.#closing) {
-        this.#started = true;
-        this.events.emit(AppStarted, undefined);
-      }
+    // Startup belongs to the application, not the request/task/factory that
+    // first admits work. Allocate the shared promise outside those contexts too.
+    return activeScope.exit(() =>
+      withoutExecution(() => {
+        const { promise, resolve, reject } = Promise.withResolvers<void>();
+        this.#starting = promise;
+        void this.scope.start().then(() => {
+          if (!this.#closing) {
+            this.#started = true;
+            this.events.emit(AppStarted, undefined);
+          }
 
-      resolve();
-    }, reject);
+          resolve();
+        }, reject);
 
-    return promise;
+        return promise;
+      }),
+    );
   }
 
   /** Call before serving work, including transports that do not require start(). */

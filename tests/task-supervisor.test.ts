@@ -13,6 +13,7 @@ import {
   fork,
   inject,
   onDispose,
+  peekState,
   provide,
   scoped,
   signal,
@@ -350,6 +351,37 @@ test("background work waits for application startup before accessing providers",
   gate.resolve();
   expect(await task).toBe("ready");
   expect(app.started).toBe(true);
+});
+
+test("cancelling the first submission does not cancel shared startup or waiting siblings", async () => {
+  await using app = new ApplicationLifecycle();
+  const startup = Promise.withResolvers<void>();
+  const reason = new Error("cancel first task");
+  let ready = false;
+  let firstRan = false;
+  app.scope.addStartup(async () => {
+    const inheritedSignal = peekState()?.context.signal;
+    await startup.promise;
+    inheritedSignal?.throwIfAborted();
+    ready = true;
+  });
+  const first = app.background.run(() => {
+    firstRan = true;
+  });
+  const second = app.background.run(() => ready);
+  const outcomes = Promise.allSettled([first, second]);
+  first.cancel(reason);
+  startup.resolve();
+
+  expect(await outcomes).toEqual([
+    { status: "rejected", reason },
+    { status: "fulfilled", value: true },
+  ]);
+  expect(firstRan).toBe(false);
+  await app.start();
+  expect(app.started).toBe(true);
+  expect(await app.background.run(() => "still usable")).toBe("still usable");
+  await app.close();
 });
 
 test("shutdown during pending startup never starts the submitted handler", async () => {
