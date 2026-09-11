@@ -183,15 +183,46 @@ Use `scoped()` when a resource should be acquired once in the active scope witho
 
 ## Application lifecycle and events
 
-`ApplicationLifecycle` owns a root `Scope` and an `EventBus`.
+`ApplicationLifecycle` owns a root `Scope`, an `EventBus`, and a background `TaskSupervisor`.
 
 - `start()` runs registered startup hooks in dependency order and emits `AppStarted`.
 - `admit()` joins pending startup or seals synchronous startup before accepting work.
 - `onDrain()` registers producer shutdown hooks that complete before resources are disposed.
-- `close()` stops admission, emits `AppClosing`, drains producers, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
+- `close()` stops admission, cancels background work, emits `AppClosing`, joins producers and background cleanup, flushes event deliveries, disposes the root scope, emits `AppClosed`, and closes the event bus.
 - `close()` is idempotent, and `ApplicationLifecycle` implements `AsyncDisposable`.
 
 Events use identity-based keys created by `eventKey<T>()`. Equal descriptions do not make two keys equal. Synchronous listeners run during `emit()` and share the emitter's scope. Asynchronous listeners run in bus-owned managed executions joined by `flush()` or `close()`; each delivery owns a child of the bus scope, so a listener resolves application providers, and resources it acquires with `scoped()` or `onDispose()` are released when that delivery ends.
+
+### Application-owned background work
+
+Use `app.background.run()` for process-local work that may outlive its submitting request. It waits for application startup and returns an awaitable `Task<T>`; `task.cancel(reason)` cancels only that task.
+
+```ts
+import { setTimeout } from "node:timers/promises";
+import { ApplicationLifecycle, contextKey, provide, signal, use } from "@tiberjs/runner";
+
+const Tenant = contextKey<string>("tenant");
+
+await using app = new ApplicationLifecycle();
+await app.start();
+
+const task = app.background.run({ values: [provide(Tenant, "acme")] }, () =>
+  setTimeout(25, use(Tenant), { signal: signal() }),
+);
+
+console.log(await task); // "acme"
+```
+
+Each task starts with a fresh cancellation signal and its own child of the application scope. It inherits no caller context, attachment, deadline, or construction scope. Supply context values explicitly; bindings are captured at submission, but their values are not cloned. Closures can still capture request resources—pass the needed data and acquire resources inside the background handler instead.
+
+The returned task settles after its handler, child tasks, and scope cleanup finish. Awaiting the task transfers responsibility for its failure to the caller. Otherwise failures remain retained by the supervisor and reject `flush()` or `close()`; a failed task does not cancel siblings.
+
+- `await app.background.flush()` waits without cancelling work and leaves admission open.
+- `await app.background.close()` permanently stops admission, cancels active work, and joins cleanup. `app.close()` does this automatically, before shared resources are disposed.
+
+Cancellation is cooperative. Flush before application shutdown if work must finish naturally; do not await a supervisor's flush/close (or `app.close()`) inside a task it must join. Background handlers wait for startup, so startup hooks must not await those handlers.
+
+For a separately owned supervisor, use `new TaskSupervisor(scope)` and close it before disposing the borrowed scope. An optional second argument supplies an admission callback. No jobs are persisted or restarted.
 
 ## Tracing
 
@@ -269,6 +300,7 @@ await execute(
 | Cancellation     | `signal`, `deadline`, `timeout`, `scheduleDeadline`                             |
 | DI and resources | `Scope`, `token`, `inject`, `scoped`, `currentScope`, `onStart`, `onDispose`    |
 | Lifecycle        | `ApplicationLifecycle`, `AppStarted`, `AppClosing`, `AppClosed`                 |
+| Background work  | `TaskSupervisor`, `BackgroundSeed`                                              |
 | Events           | `EventBus`, `eventKey`                                                          |
 | Tracing          | `setTracer`, `span`, `Tracer`, `TraceSpan`                                      |
 | Utilities        | `defer`, `combinedError`                                                        |

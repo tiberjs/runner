@@ -2,6 +2,7 @@ import { Scope } from "../di/scope.js";
 import { AppClosed, AppClosing, AppStarted } from "../events/application.js";
 import { EventBus } from "../events/event-bus.js";
 import { combinedError } from "./errors.js";
+import { TaskSupervisor } from "./task-supervisor.js";
 
 type Drain = () => void | Promise<void>;
 
@@ -9,6 +10,7 @@ type Drain = () => void | Promise<void>;
 export class ApplicationLifecycle implements AsyncDisposable {
   readonly scope: Scope;
   readonly events: EventBus;
+  readonly background: TaskSupervisor;
   #starting: Promise<void> | undefined;
   #closing: Promise<void> | undefined;
   #started = false;
@@ -18,6 +20,7 @@ export class ApplicationLifecycle implements AsyncDisposable {
     this.scope = new Scope(undefined, { startup: true });
     this.events = new EventBus(this.scope);
     this.scope.provide(EventBus, () => this.events);
+    this.background = new TaskSupervisor(this.scope, () => this.admit());
   }
 
   get starting(): Promise<void> | undefined {
@@ -112,6 +115,9 @@ export class ApplicationLifecycle implements AsyncDisposable {
   }
 
   async #shutdown(): Promise<void> {
+    // Cancel before drainers run: a drainer may be waiting for a background task.
+    // Observe rejection immediately while startup and producers finish in parallel.
+    const background = Promise.allSettled([this.background.close()]);
     this.events.emit(AppClosing, undefined);
     const draining = this.#drain();
 
@@ -125,6 +131,20 @@ export class ApplicationLifecycle implements AsyncDisposable {
     }
 
     const errors = await draining;
+    const [backgroundOutcome] = await background;
+    // Waiting submissions can all reject with the same startup failure. The
+    // root scope/startup path below already owns that failure.
+    if (
+      backgroundOutcome.status === "rejected" &&
+      !(
+        startupFailed &&
+        (Object.is(backgroundOutcome.reason, startupFailure) ||
+          (backgroundOutcome.reason instanceof AggregateError &&
+            backgroundOutcome.reason.errors.every((error) => Object.is(error, startupFailure))))
+      )
+    ) {
+      errors.push(backgroundOutcome.reason);
+    }
     await this.events.flush();
 
     try {
