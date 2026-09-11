@@ -21,6 +21,91 @@ import {
 } from "../src/index.js";
 
 describe("Scope lifecycle", () => {
+  test("synchronous disposal closes untouched children without touching their parent", async () => {
+    const parent = new Scope();
+    const scope = parent.child();
+    const Value = token<object>("unused provider");
+    let acquired = false;
+    scope.provide(Value, () => {
+      acquired = true;
+      return {};
+    });
+
+    expect(scope.disposeSync()).toBe(true);
+    expect(scope.disposeSync()).toBe(true);
+    expect(scope.has(Value)).toBe(false);
+    expect(() => scope.get(Value)).toThrow(ScopeClosedError);
+    expect(() => scope.use(Value, () => ({}))).toThrow(ScopeClosedError);
+    expect(() => scope.child()).toThrow(ScopeClosedError);
+    expect(() => scope.provide(Value, () => ({}))).toThrow(ScopeClosedError);
+    expect(() => scope.defer(() => {})).toThrow(ScopeClosedError);
+    expect(() => scope.addStartup(() => {})).toThrow(ScopeClosedError);
+    expect(() => scope.sealStartup()).toThrow(ScopeClosedError);
+    await expect(scope.start()).rejects.toBeInstanceOf(ScopeClosedError);
+    expect(scope.startupPending).toBe(false);
+    expect(acquired).toBe(false);
+
+    const closing = scope[Symbol.asyncDispose]();
+    expect(scope[Symbol.asyncDispose]()).toBe(closing);
+    await closing;
+    expect(scope.disposeSync()).toBe(true);
+
+    parent.provide(Value, () => ({}));
+    expect(parent.disposeSync()).toBe(true);
+  });
+
+  test("a synchronous disposal attempt preserves cached instances and resource ownership", async () => {
+    const scope = new Scope();
+    const Value = token<object>("owned instance");
+    const value = {};
+    const order: string[] = [];
+    scope.use(
+      Value,
+      () => value,
+      () => {
+        order.push("resource");
+      },
+    );
+    expect(scope.disposeSync()).toBe(false);
+    expect(scope.get(Value)).toBe(value);
+    scope.defer(() => {
+      order.push("deferred");
+    });
+    expect(order).toEqual([]);
+
+    await scope[Symbol.asyncDispose]();
+    expect(scope.disposeSync()).toBe(false);
+    await scope[Symbol.asyncDispose]();
+    expect(order).toEqual(["deferred", "resource"]);
+    expect(() => scope.get(Value)).toThrow(ScopeClosedError);
+  });
+
+  test("plain cached values still require the asynchronous disposal path", async () => {
+    const scope = new Scope();
+    const Value = token<undefined>("cached undefined");
+    scope.use(Value, () => undefined);
+    expect(scope.disposeSync()).toBe(false);
+    expect(scope.has(Value)).toBe(true);
+    expect(scope.get(Value)).toBeUndefined();
+    await scope[Symbol.asyncDispose]();
+    expect(scope.has(Value)).toBe(false);
+    expect(scope.disposeSync()).toBe(false);
+  });
+
+  test("synchronous attempts do not hide a previous asynchronous cleanup failure", async () => {
+    const scope = new Scope();
+    const failure = new Error("cleanup", { cause: new Error("native cause") });
+    let disposed = 0;
+    scope.defer(() => {
+      disposed++;
+      throw failure;
+    });
+    await expect(scope[Symbol.asyncDispose]()).rejects.toBe(failure);
+    expect(scope.disposeSync()).toBe(false);
+    await expect(scope[Symbol.asyncDispose]()).rejects.toBe(failure);
+    expect(disposed).toBe(1);
+  });
+
   test("concurrent disposal waits for one LIFO drain, including late cleanup", async () => {
     const scope = new Scope();
     const entered = Promise.withResolvers<void>();
@@ -43,11 +128,14 @@ describe("Scope lifecycle", () => {
       events.push("second:end");
     });
 
+    expect(scope.disposeSync()).toBe(false);
+
     let completed = 0;
     const first = scope[Symbol.asyncDispose]().then(() => {
       completed++;
     });
     await entered.promise;
+    expect(scope.disposeSync()).toBe(false);
 
     const second = scope[Symbol.asyncDispose]().then(() => {
       completed++;

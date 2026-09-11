@@ -91,11 +91,13 @@ export class TaskSupervisor implements AsyncDisposable {
 
             try {
               // execute() joins descendants but leaves its supplied scope to us.
-              await activeScope.exit(() =>
-                state
-                  ? runWith(state, () => scope[Symbol.asyncDispose]())
-                  : scope[Symbol.asyncDispose](),
-              );
+              if (!scope.disposeSync()) {
+                await activeScope.exit(() =>
+                  state
+                    ? runWith(state, () => scope[Symbol.asyncDispose]())
+                    : scope[Symbol.asyncDispose](),
+                );
+              }
             } catch (error) {
               (errors ??= []).push(error);
             }

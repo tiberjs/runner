@@ -124,7 +124,9 @@ export async function execute<T>(
 
   if (ownsScope) {
     try {
-      await activeScope.exit(() => runWith(state, () => state.scope[Symbol.asyncDispose]()));
+      if (!state.scope.disposeSync()) {
+        await activeScope.exit(() => runWith(state, () => state.scope[Symbol.asyncDispose]()));
+      }
     } catch (error) {
       (errors ??= []).push(error);
     }

@@ -1,4 +1,4 @@
-import { ResolutionError } from "./errors.js";
+import { ResolutionError, ScopeClosedError } from "./errors.js";
 import { ResourceLifecycle } from "./resources.js";
 import { ResolutionTracker, type ResolutionGraph } from "./resolution-graph.js";
 import type { Factory, InjectionToken } from "./tokens.js";
@@ -24,6 +24,7 @@ export class Scope {
   #factories: Map<InjectionToken<unknown>, Factory<unknown>> | undefined;
   #resolving: Set<InjectionToken<unknown>> | undefined;
   #disposePromise: Promise<void> | undefined;
+  #disposed = false;
   readonly #startup: boolean;
 
   constructor(parent?: Scope, options?: ScopeOptions) {
@@ -33,15 +34,19 @@ export class Scope {
   }
 
   get #resourceLifecycle(): ResourceLifecycle {
-    return (this.#resources ??= new ResourceLifecycle(
-      this,
-      this.#startup,
-      this.#parent ? this.#parent.#resourceLifecycle : undefined,
-    ));
+    if (!this.#resources) {
+      this.#assertNotDisposed();
+      this.#resources = new ResourceLifecycle(
+        this,
+        this.#startup,
+        this.#parent ? this.#parent.#resourceLifecycle : undefined,
+      );
+    }
+    return this.#resources;
   }
 
   get #resolutionTracker(): ResolutionTracker | undefined {
-    if (this.#root.#resources?.disposed) {
+    if (this.#root.#disposed || this.#root.#resources?.disposed) {
       return undefined;
     }
 
@@ -50,7 +55,7 @@ export class Scope {
 
   /** A child scope resolves application singletons through its parent. */
   child(): Scope {
-    this.#resources?.assertOpen();
+    this.#assertOpen();
     return new Scope(this);
   }
 
@@ -60,7 +65,7 @@ export class Scope {
   }
 
   provide<T>(token: InjectionToken<T>, factory: Factory<T>): void {
-    this.#resources?.assertOpen();
+    this.#assertOpen();
     (this.#factories ??= new Map()).set(token, factory as Factory<unknown>);
   }
 
@@ -74,7 +79,7 @@ export class Scope {
 
   /** Resolve local cache/provider, then ancestors; default classes live at root. */
   get<T>(token: InjectionToken<T>): T {
-    this.#resources?.assertNotDisposed();
+    this.#assertNotDisposed();
     if (this.#instances?.has(token)) {
       this.#resolutionTracker?.record(this, token);
       return this.#instances.get(token) as T;
@@ -84,7 +89,7 @@ export class Scope {
     if (!this.#factories?.has(token) && this.#parent) {
       return this.#parent.get(token);
     }
-    this.#resources?.assertOpen();
+    this.#assertOpen();
 
     return this.#acquire(token, () => {
       const factory = this.#factories?.get(token);
@@ -105,13 +110,13 @@ export class Scope {
     factory: () => T,
     dispose?: (value: T) => unknown | Promise<unknown>,
   ): T {
-    this.#resources?.assertNotDisposed();
+    this.#assertNotDisposed();
     if (this.#instances?.has(token)) {
       this.#resolutionTracker?.record(this, token);
       return this.#instances.get(token) as T;
     }
 
-    this.#resources?.assertOpen();
+    this.#assertOpen();
     return this.#acquire(token, factory, dispose);
   }
 
@@ -126,12 +131,15 @@ export class Scope {
   }
 
   start(): Promise<void> {
+    if (this.#disposed && !this.#resources) {
+      return Promise.reject(new ScopeClosedError("disposed"));
+    }
     return this.#resourceLifecycle.start();
   }
 
   /** Whether resolved resources queued initialization that only start() can run. */
   get startupPending(): boolean {
-    return this.#resourceLifecycle.startupPending;
+    return !this.#disposed && this.#resourceLifecycle.startupPending;
   }
 
   /** Seal synchronous admission; pending hooks require awaiting start() instead. */
@@ -139,8 +147,26 @@ export class Scope {
     this.#resourceLifecycle.sealStartup();
   }
 
+  /**
+   * Close an untouched scope without allocating an asynchronous disposal barrier.
+   * Returns false without mutation if resources or instances exist; await async
+   * disposal instead. Repeated synchronous disposal of an untouched scope is safe.
+   */
+  disposeSync(): boolean {
+    if (this.#resources || this.#instances) {
+      return false;
+    }
+    if (!this.#disposed) {
+      this.#clearResolution();
+    }
+    return true;
+  }
+
   /** Close acquisition synchronously, then clear resolution storage after teardown. */
   [Symbol.asyncDispose](): Promise<void> {
+    if (this.#disposed && !this.#resources) {
+      return (this.#disposePromise ??= Promise.resolve());
+    }
     try {
       this.#resourceLifecycle.assertCanClose();
     } catch (error) {
@@ -151,18 +177,37 @@ export class Scope {
     }
 
     this.#disposePromise = this.#resourceLifecycle.close().finally(() => {
-      this.#instances = undefined;
-      this.#factories = undefined;
-      this.#resolving = undefined;
-
-      if (this === this.#root) {
-        this.#graph = undefined;
-      } else {
-        this.#root.#graph?.remove(this);
-      }
+      this.#clearResolution();
     });
 
     return this.#disposePromise;
+  }
+
+  #assertNotDisposed(): void {
+    if (this.#disposed) {
+      throw new ScopeClosedError("disposed");
+    }
+    this.#resources?.assertNotDisposed();
+  }
+
+  #assertOpen(): void {
+    if (this.#disposed) {
+      throw new ScopeClosedError("disposed");
+    }
+    this.#resources?.assertOpen();
+  }
+
+  #clearResolution(): void {
+    this.#disposed = true;
+    this.#instances = undefined;
+    this.#factories = undefined;
+    this.#resolving = undefined;
+
+    if (this === this.#root) {
+      this.#graph = undefined;
+    } else {
+      this.#root.#graph?.remove(this);
+    }
   }
 
   #acquire<T>(
