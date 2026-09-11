@@ -63,7 +63,7 @@ test("child ownership preserves handler and native disposal failures together", 
     }).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AggregateError);
-    expect((failure as AggregateError).errors).toEqual([handlerFailure, cleanupFailure]);
+    expect((failure as AggregateError).errors).toHaveLength(2);
     expect((failure as AggregateError).errors[0]).toBe(handlerFailure);
     expect((failure as AggregateError).errors[1]).toBe(cleanupFailure);
     const StillOpen = token<number>("still open");

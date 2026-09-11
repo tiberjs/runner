@@ -362,12 +362,6 @@ await execute(
 );
 ```
 
-## Pitfalls
-
-Execution scope ownership, background isolation, startup hooks, and event failure
-reporting behave deliberately but surprise callers. Each contract, its cause in source,
-and its fix are collected in [docs/pitfalls.md](docs/pitfalls.md).
-
 ## API overview
 
 | Area             | Exports                                                                                                                                           |
