@@ -38,6 +38,8 @@ export { deadline, signal, timeout } from "./runtime/timeout.js";
 export { scheduleDeadline } from "./runtime/deadline.js";
 export { Task, TaskGroup } from "./runtime/task-group.js";
 export { defer } from "./runtime/defer.js";
+export { Cancelable, call } from "./runtime/cancelable.js";
+export type { CallContext } from "./runtime/cancelable.js";
 
 export { setTracer, span } from "./runtime/span.js";
 export type { Tracer, TraceSpan } from "./runtime/span.js";
