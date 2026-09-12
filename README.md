@@ -55,25 +55,31 @@ if (result.ok) {
 }
 ```
 
-Use `ok` to distinguish success from failure: both a successful value and a thrown error may be `undefined`. Self/ancestor observation is still an invalid lifecycle dependency; `result()` rejects that operation by throwing synchronously.
+Use `ok` to distinguish success from failure: both a successful value and a thrown error may be `undefined`. `result()` and `value()` reject self/ancestor observation synchronously.
 
-The body receives a single-use publisher. `Job<Result, Published = Result>` keeps the
-published value's type separate from the body's eventual result. Publication remains
-available after cancellation so a body can publish a mapped answer, and the publisher
-accepts a promise when publication itself completes asynchronously:
+The body receives a publisher that may be called once while the body is running.
+`Job<Result, Published = Result>` keeps the published value's type separate from the
+body's eventual result. The publisher accepts a value or `PromiseLike` value.
+Cancellation does not disable publication; `result()` and `await job` still report the
+Job's final success or failure independently.
 
 ```ts
-const ended = Promise.withResolvers<void>();
-const request = new Job<void, Response>(async (publish) => {
-  publish(new Response("streaming"));
-  await ended.promise;
+const release = Promise.withResolvers<void>();
+const job = new Job<number, string>(async (publish) => {
+  publish("ready");
+  await release.promise;
+  return 42;
 });
 
-request.start();
-const response = await request.value(); // The Job is still running.
-ended.resolve();
-await request; // The complete lifetime.
+job.start();
+console.log(await job.value()); // "ready"; the Job is still running.
+release.resolve();
+console.log(await job); // 42; the body and descendants have settled.
 ```
+
+`cancelChildren(reason)` cancels direct children, lets cancellation cascade through
+their descendants, and resolves after those child lifetimes settle. It does not cancel
+the Job itself or close admission for later children.
 
 `reconcileFailure(error)` replaces the Job's cancellation reason with genuine failures
 already recorded from its descendants. An independent caught error and recorded failure

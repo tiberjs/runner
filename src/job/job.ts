@@ -22,7 +22,7 @@ export type JobPublisher<T> = (value: T | PromiseLike<T>) => void;
 
 const CHILD_FAILED = new DOMException("A child job failed", "AbortError");
 
-/** A cold, single-use execution with separate published-value and lifetime observations. */
+/** A cold, single-use execution that may publish before its full lifetime settles. */
 export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   private readonly controller = new AbortController();
   private readonly settled = Promise.withResolvers<JobResult<unknown>>();
@@ -50,12 +50,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   /**
-   * Publish the body's answer once, without waiting for descendants.
-   *
-   * Cancellation does not close this door: a Job that was cancelled, or whose
-   * child failed, still owes its caller the answer its body decided on - an
-   * HTTP error response is published exactly there. Only the value's own
-   * rejection is reported to `value()`.
+   * Publish one value while the body is running, independently of Job cancellation.
    */
   private readonly publish = (value: unknown | PromiseLike<unknown>): void => {
     if (this.phase !== "running") {
@@ -99,7 +94,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   /**
-   * Reconcile a caught rejection with failures recorded from this Job's descendants.
+   * Reconcile a caught rejection with genuine failures already recorded by this Job.
    */
   reconcileFailure(error: unknown): unknown {
     const failures = this.failures;
@@ -336,9 +331,10 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   /**
-   * Observe the body-published value without waiting for the Job's lifetime.
+   * Observe the body-published value without joining the Job's descendants.
    *
-   * Rejects with the Job failure when it settles before publishing.
+   * A Job that closes without publishing rejects with its failure, or with a
+   * lifecycle error when the Job itself succeeded.
    */
   value(): Promise<Published> {
     const dependency = this.dependency("value");
@@ -365,6 +361,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     return this.drain();
   }
 
+  /** Cancel direct children and join their lifetimes without cancelling this Job. */
   cancelChildren(reason?: unknown): Promise<void> {
     const current = peekState()?.job;
     if (current !== this && this.owns(current)) {
