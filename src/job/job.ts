@@ -198,18 +198,22 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     const inheritedSignal = inherited?.signal;
     const receivesInherited = this.isExternalCancellationSource(inheritedSignal);
     const receivesExternal = this.isExternalCancellationSource(externalSignal);
-    if (receivesInherited || receivesExternal) {
+    if (!this.signal.aborted && (receivesInherited || receivesExternal)) {
       const cancellation = (this.cancellation ??= new CancellationBindings());
       const cancel = (reason: unknown): void => this.cancel(reason);
       if (receivesInherited) {
         cancellation.link(inheritedSignal, cancel);
       }
-      if (receivesExternal) {
+      if (receivesExternal && !this.signal.aborted) {
         cancellation.link(externalSignal, cancel);
       }
     }
     const ownerDeadline = this.owner?.context.deadline;
-    if (deadline !== undefined && (ownerDeadline === undefined || deadline < ownerDeadline)) {
+    if (
+      !this.signal.aborted &&
+      deadline !== undefined &&
+      (ownerDeadline === undefined || deadline < ownerDeadline)
+    ) {
       (this.cancellation ??= new CancellationBindings()).deadline(deadline, () => {
         this.cancel(new DOMException("Job deadline exceeded", "TimeoutError"));
       });
@@ -290,12 +294,19 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   cancel(reason?: unknown): void {
-    if (this.phase === "closed") {
-      return;
-    }
-    this.controller.abort(reason);
-    for (const child of this.children ?? []) {
-      child.cancel(this.signal.reason);
+    const jobs: Job<unknown, unknown>[] = [this];
+    const reasons: unknown[] = [reason];
+    while (jobs.length > 0) {
+      const job = jobs.pop()!;
+      const received = reasons.pop();
+      if (job.phase === "closed") {
+        continue;
+      }
+      job.controller.abort(received);
+      for (const child of job.children ?? []) {
+        jobs.push(child);
+        reasons.push(job.signal.reason);
+      }
     }
   }
 
