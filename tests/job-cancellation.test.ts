@@ -1,7 +1,7 @@
 import { getEventListeners } from "node:events";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import { expect, test, vi } from "vitest";
-import { Job, execute, fork, signal } from "../src/index.js";
+import { ContextFrame, Job, execute, fork, signal } from "../src/index.js";
 
 function untilAbort(): Promise<void> {
   const current = signal();
@@ -85,6 +85,85 @@ test("reentrant external cancellation never starts or leaks an admitted Job", as
   } finally {
     registration.mockRestore();
   }
+});
+
+test("a Job cancelled before activation does not subscribe to external sources", async () => {
+  const source = new AbortController();
+  const reason = new Error("cancel before start");
+  const job = new Job(() => undefined, { signal: source.signal });
+  const result = job.result();
+  job.cancel(reason);
+  job.start();
+
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+  expect(await result).toEqual({ ok: false, error: reason });
+});
+
+test("one external source shared by context and seed has one subscription", async () => {
+  const source = new AbortController();
+  const release = Promise.withResolvers<void>();
+  const reason = new Error("shared source");
+  const job = new Job(() => release.promise, { signal: source.signal }).start({
+    context: {
+      values: ContextFrame.empty,
+      signal: source.signal,
+      attachment: undefined,
+    },
+  });
+  expect(getEventListeners(source.signal, "abort")).toHaveLength(1);
+
+  source.abort(reason);
+  release.resolve();
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+});
+
+test("the first of two external sources wins and the other subscription is released", async () => {
+  const inherited = new AbortController();
+  const seeded = new AbortController();
+  const reason = new Error("inherited source");
+  const job = new Job(untilAbort, { signal: seeded.signal }).start({
+    context: {
+      values: ContextFrame.empty,
+      signal: inherited.signal,
+      attachment: undefined,
+    },
+  });
+  expect(getEventListeners(inherited.signal, "abort")).toHaveLength(1);
+  expect(getEventListeners(seeded.signal, "abort")).toHaveLength(1);
+
+  inherited.abort(reason);
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(getEventListeners(inherited.signal, "abort")).toEqual([]);
+  expect(getEventListeners(seeded.signal, "abort")).toEqual([]);
+
+  seeded.abort(new Error("late source"));
+  expect(job.signal.reason).toBe(reason);
+});
+
+test("external cancellation remains linked while a Job drains children", async () => {
+  const source = new AbortController();
+  const entered = Promise.withResolvers<void>();
+  const reason = new Error("cancel while closing");
+  let childStopped = false;
+  const job = new Job(
+    () => {
+      fork(async () => {
+        entered.resolve();
+        await untilAbort();
+        childStopped = true;
+      });
+    },
+    { signal: source.signal },
+  ).start();
+
+  await entered.promise;
+  await nextTurn();
+  expect(job.state).toBe("closing");
+  source.abort(reason);
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(childStopped).toBe(true);
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
 });
 
 test("a NaN cancellation reason does not turn cancelled work into a genuine failure", async () => {

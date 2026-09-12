@@ -198,18 +198,22 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     const inheritedSignal = inherited?.signal;
     const receivesInherited = this.isExternalCancellationSource(inheritedSignal);
     const receivesExternal = this.isExternalCancellationSource(externalSignal);
-    if (receivesInherited || receivesExternal) {
+    if (!this.signal.aborted && (receivesInherited || receivesExternal)) {
       const cancellation = (this.cancellation ??= new CancellationBindings());
       const cancel = (reason: unknown): void => this.cancel(reason);
       if (receivesInherited) {
         cancellation.link(inheritedSignal, cancel);
       }
-      if (receivesExternal) {
+      if (receivesExternal && !this.signal.aborted) {
         cancellation.link(externalSignal, cancel);
       }
     }
     const ownerDeadline = this.owner?.context.deadline;
-    if (deadline !== undefined && (ownerDeadline === undefined || deadline < ownerDeadline)) {
+    if (
+      !this.signal.aborted &&
+      deadline !== undefined &&
+      (ownerDeadline === undefined || deadline < ownerDeadline)
+    ) {
       (this.cancellation ??= new CancellationBindings()).deadline(deadline, () => {
         this.cancel(new DOMException("Job deadline exceeded", "TimeoutError"));
       });
