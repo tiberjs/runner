@@ -159,6 +159,10 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     return this;
   }
 
+  private isExternalCancellationSource(source: AbortSignal | undefined): source is AbortSignal {
+    return source !== undefined && source !== this.signal && source !== this.owner?.signal;
+  }
+
   private prepare(inherited: ExecutionContext | undefined): void {
     // Ownership is committed; seed access and abort delivery see a base context.
     this.executionContext = {
@@ -167,12 +171,6 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       deadline: inherited?.deadline,
       attachment: inherited?.attachment,
     };
-    if (this.owner) {
-      (this.cancellation ??= new CancellationBindings()).link(this.owner.signal, this.controller);
-    }
-    if (inherited?.signal) {
-      (this.cancellation ??= new CancellationBindings()).link(inherited.signal, this.controller);
-    }
     const entries = this.seed?.values;
     const externalSignal = this.seed?.signal;
     const requestedDeadline = this.seed?.deadline;
@@ -197,8 +195,18 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       deadline,
       attachment,
     };
-    if (externalSignal && externalSignal !== this.signal) {
-      (this.cancellation ??= new CancellationBindings()).link(externalSignal, this.controller);
+    const inheritedSignal = inherited?.signal;
+    const receivesInherited = this.isExternalCancellationSource(inheritedSignal);
+    const receivesExternal = this.isExternalCancellationSource(externalSignal);
+    if (receivesInherited || receivesExternal) {
+      const cancellation = (this.cancellation ??= new CancellationBindings());
+      const cancel = (reason: unknown): void => this.cancel(reason);
+      if (receivesInherited) {
+        cancellation.link(inheritedSignal, cancel);
+      }
+      if (receivesExternal) {
+        cancellation.link(externalSignal, cancel);
+      }
     }
     const ownerDeadline = this.owner?.context.deadline;
     if (deadline !== undefined && (ownerDeadline === undefined || deadline < ownerDeadline)) {
@@ -286,7 +294,6 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       return;
     }
     this.controller.abort(reason);
-    // Also reach children admitted before signal linking has finished.
     for (const child of this.children ?? []) {
       child.cancel(this.signal.reason);
     }

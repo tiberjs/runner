@@ -1,20 +1,3 @@
-import { addAbortListener } from "node:events";
-
-/** Propagate parent cancellation to a child controller until unlinked. */
-export function linkAbort(parent: AbortSignal, child: AbortController): () => void {
-  if (parent.aborted) {
-    child.abort(parent.reason);
-    return () => {};
-  }
-
-  const subscription = addAbortListener(parent, () => child.abort(parent.reason));
-  // Listener installation can itself reenter source cancellation.
-  if (parent.aborted) {
-    child.abort(parent.reason);
-  }
-  return () => subscription[Symbol.dispose]();
-}
-
 /**
  * Whether `error` is this signal's cancellation rather than a genuine failure.
  *
