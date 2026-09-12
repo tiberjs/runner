@@ -6,9 +6,10 @@ import { isCancellation } from "./abort.js";
 import { CancellationBindings } from "./cancellation-bindings.js";
 import { FailureSet } from "./failure-set.js";
 import { peekState, runWith, withoutExecution } from "../execution/state.js";
+import type { OwnedHandoff } from "./handoff.js";
 
 export interface JobStartOptions {
-  readonly parent?: Job<unknown, unknown>;
+  readonly parent?: Job<unknown>;
   readonly context?: ExecutionContext;
   readonly propagation?: "propagate" | "isolate";
 }
@@ -18,30 +19,26 @@ export type JobResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: unknown };
 
-export type JobPublisher<T> = (value: T | PromiseLike<T>) => void;
-
 const CHILD_FAILED = new DOMException("A child job failed", "AbortError");
 
-/** A cold, single-use execution that may publish before its full lifetime settles. */
-export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
+/** A cold, single-use execution that settles once its body and descendants finish. */
+export class Job<T> implements PromiseLike<T>, AsyncDisposable {
   private readonly controller = new AbortController();
   private readonly settled = Promise.withResolvers<JobResult<unknown>>();
-  private publication?: PromiseWithResolvers<JobResult<unknown>>;
-  private publicationResult?: JobResult<unknown>;
-  private publishing = false;
-  private children: Set<Job<unknown, unknown>> | undefined;
-  private owner: Job<unknown, unknown> | undefined;
+  private children: Set<Job<unknown>> | undefined;
+  private owner: Job<unknown> | undefined;
   private executionContext: ExecutionContext | undefined;
   private phase: JobState = "created";
   private propagation: "propagate" | "isolate" = "propagate";
-  private supervisor: Supervisor<unknown, unknown> | undefined;
+  private supervisor: Supervisor<unknown> | undefined;
   private propagateFailureToParent = false;
   private failures: FailureSet | undefined;
   private cancellation: CancellationBindings | undefined;
   private closing: Promise<void> | undefined;
+  private handoff: OwnedHandoff | undefined;
 
   constructor(
-    private readonly body: (publish: JobPublisher<Published>) => T | PromiseLike<T>,
+    private readonly body: () => T | PromiseLike<T>,
     private readonly seed?: ExecutionSeed,
   ) {
     if (typeof body !== "function") {
@@ -49,24 +46,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     }
   }
 
-  /**
-   * Publish one value while the body is running, independently of Job cancellation.
-   */
-  private readonly publish = (value: unknown | PromiseLike<unknown>): void => {
-    if (this.phase !== "running") {
-      throw new LifecycleStateError("Job", "publish", this.phase);
-    }
-    if (this.publishing) {
-      throw new TypeError("Job.publish() may only be called once.");
-    }
-    this.publishing = true;
-    void Promise.resolve(value).then(
-      (published) => this.resolvePublication({ ok: true, value: published }),
-      (error: unknown) => this.resolvePublication({ ok: false, error }),
-    );
-  };
-
-  get parent(): Job<unknown, unknown> | undefined {
+  get parent(): Job<unknown> | undefined {
     return this.owner;
   }
 
@@ -111,7 +91,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     return this.children?.size ?? 0;
   }
 
-  owns(other: Job<unknown, unknown> | undefined): boolean {
+  owns(other: Job<unknown> | undefined): boolean {
     for (let node = other; node; node = node.owner) {
       if (node === this) {
         return true;
@@ -121,11 +101,19 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   /** Bind an optional manager before activation; ownership remains on this Job. */
-  manage(supervisor: Supervisor<unknown, unknown>): void {
+  manage(supervisor: Supervisor<unknown>): void {
     if (this.phase !== "created" || this.supervisor) {
       throw new LifecycleStateError("Job", "manage", this.phase);
     }
     this.supervisor = supervisor;
+  }
+
+  /** @internal Bind a HandoffJob's rendezvous before activation. */
+  attach(handoff: OwnedHandoff): void {
+    if (this.phase !== "created" || this.handoff) {
+      throw new LifecycleStateError("Job", "attach", this.phase);
+    }
+    this.handoff = handoff;
   }
 
   start(options: JobStartOptions = {}): this {
@@ -230,7 +218,11 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       value = await runWith({ job: this, context: this.context }, async () => {
         try {
           this.signal.throwIfAborted();
-          return await this.body(this.publish);
+          const value = await this.body();
+          if (this.handoff && !this.handoff.offered) {
+            throw new TypeError("HandoffJob body completed without offering a value.");
+          }
+          return value;
         } catch (error) {
           // Capture before a caller can cancel with this same value.
           this.recordFailure(error);
@@ -294,7 +286,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   cancel(reason?: unknown): void {
-    const jobs: Job<unknown, unknown>[] = [this];
+    const jobs: Job<unknown>[] = [this];
     const reasons: unknown[] = [reason];
     while (jobs.length > 0) {
       const job = jobs.pop()!;
@@ -303,6 +295,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
         continue;
       }
       job.controller.abort(received);
+      job.handoff?.release(job.signal.reason);
       for (const child of job.children ?? []) {
         jobs.push(child);
         reasons.push(job.signal.reason);
@@ -310,7 +303,7 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     }
   }
 
-  private dependency(operation: string): LifecycleDependencyError | undefined {
+  protected dependency(operation: string): LifecycleDependencyError | undefined {
     return this.owns(peekState()?.job)
       ? new LifecycleDependencyError("Job", operation, "Job")
       : undefined;
@@ -346,29 +339,6 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       throw dependency;
     }
     return this.settled.promise as Promise<JobResult<T>>;
-  }
-
-  /**
-   * Observe the body-published value without joining the Job's descendants.
-   *
-   * A Job that closes without publishing rejects with its failure, or with a
-   * lifecycle error when the Job itself succeeded.
-   */
-  value(): Promise<Published> {
-    const dependency = this.dependency("value");
-    if (dependency) {
-      throw dependency;
-    }
-    const publication = (this.publication ??= Promise.withResolvers<JobResult<unknown>>());
-    if (this.publicationResult) {
-      publication.resolve(this.publicationResult);
-    }
-    return publication.promise.then((result) => {
-      if (!result.ok) {
-        throw result.error;
-      }
-      return result.value as Published;
-    });
   }
 
   joinChildren(): Promise<void> {
@@ -440,24 +410,14 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     return promise;
   }
 
-  private resolvePublication(result: JobResult<unknown>): void {
-    this.publicationResult = result;
-    this.publication?.resolve(result);
-  }
-
   private complete(result: JobResult<unknown>): void {
     this.phase = "closed";
-    if (!this.publishing) {
-      this.publishing = true;
-      this.resolvePublication(
-        result.ok
-          ? { ok: false, error: new LifecycleStateError("Job", "value", this.phase) }
-          : result,
-      );
-    }
     this.cancellation?.[Symbol.dispose]();
     this.cancellation = undefined;
     this.owner?.children?.delete(this);
+    if (this.handoff && !this.handoff.offered && !result.ok) {
+      this.handoff.settle(result.error);
+    }
     this.settled.resolve(result);
   }
 

@@ -7,7 +7,7 @@ import type { Job } from "../job/job.js";
  */
 export interface RuntimeState {
   readonly context: ExecutionContext;
-  readonly job: Job<unknown, unknown>;
+  readonly job: Job<unknown>;
 }
 
 const storage = new AsyncLocalStorage<RuntimeState>();
