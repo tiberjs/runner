@@ -108,7 +108,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     this.supervisor = supervisor;
   }
 
-  /** @internal Bind a HandoffJob's rendezvous so cancellation and closure release it. */
+  /** @internal Bind a HandoffJob's rendezvous before activation. */
   attach(handoff: OwnedHandoff): void {
     if (this.phase !== "created" || this.handoff) {
       throw new LifecycleStateError("Job", "attach", this.phase);

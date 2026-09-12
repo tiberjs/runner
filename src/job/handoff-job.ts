@@ -2,11 +2,7 @@ import type { ExecutionSeed } from "../execution/context/execution-context.js";
 import { HandoffState, type Handoff } from "./handoff.js";
 import { Job } from "./job.js";
 
-/**
- * A Job whose body hands one value to a consumer mid-execution and suspends
- * until that consumer answers, while the Job's lifetime still settles only
- * after its body and descendants finish.
- */
+/** A Job whose body offers one value mid-execution and suspends until the consumer resumes it. */
 export class HandoffJob<Result, Offered, Resumed> extends Job<Result> {
   private readonly rendezvous: HandoffState<Offered, Resumed>;
 
@@ -23,11 +19,7 @@ export class HandoffJob<Result, Offered, Resumed> extends Job<Result> {
     this.attach(rendezvous);
   }
 
-  /**
-   * Observe the offered value without joining the Job's descendants.
-   *
-   * Rejects with the Job's failure when it closes without offering.
-   */
+  /** The offered value, or the Job's failure if it closes without offering. */
   receive(): Promise<Offered> {
     const dependency = this.dependency("receive");
     if (dependency) {
@@ -36,7 +28,6 @@ export class HandoffJob<Result, Offered, Resumed> extends Job<Result> {
     return this.rendezvous.receive();
   }
 
-  /** Answer the offer once. An answer after cancellation released the body is discarded. */
   resume(value: Resumed): void {
     this.rendezvous.resume(value);
   }

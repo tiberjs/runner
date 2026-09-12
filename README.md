@@ -66,12 +66,9 @@ are preserved together in an `AggregateError`.
 
 Use native `try/finally`, `using`, or `await using` for resources. Body-local cleanup has its ordinary lexical lifetime. If a resource must outlive an entire subtree, acquire it outside the awaited Job or `execute()` call.
 
-### Handing a value over mid-execution
+### HandoffJob
 
-A `HandoffJob` is a Job whose body hands one value to a consumer before its work is
-done and suspends until that consumer answers. The Job's lifetime is unchanged: it still
-settles only after its body and descendants finish. A handoff has no queue, buffering,
-repeated delivery, or hidden work; it is one value and one answer.
+A `HandoffJob` body offers one value and suspends until the consumer resumes it. The Job still settles only after its body and descendants finish.
 
 ```ts
 import { HandoffJob } from "@tiberjs/runner";
@@ -88,10 +85,10 @@ exchange.resume(await deliver(response));
 await exchange; // body and descendants have settled
 ```
 
-- `offer()` and `resume()` are each accepted once; a second call throws `TypeError`.
-- Cancelling the Job while its body is suspended rejects the pending `offer()` with the cancellation reason, so an abandoned consumer cannot keep a closing Job suspended. An offer made after cancellation still reaches the consumer and rejects immediately for the body. A `resume()` after that release is discarded.
-- A Job that closes without offering rejects `receive()` with its failure. A body that returns without offering fails with `TypeError`.
-- `receive()` rejects self/ancestor observation synchronously, like `result()`.
+- `offer()` and `resume()` each accept one call; a second throws `TypeError`.
+- Cancellation rejects a pending `offer()` with its reason. An offer after cancellation still reaches `receive()` but rejects for the body. A later `resume()` is discarded.
+- A body that returns without offering fails. A Job that closes without offering rejects `receive()` with its failure.
+- `receive()` rejects self/ancestor observation synchronously.
 
 ## Supervision
 
