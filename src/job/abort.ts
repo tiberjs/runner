@@ -1,16 +1,25 @@
 import { addAbortListener } from "node:events";
 
-/** Propagate parent cancellation to a child controller until unlinked. */
-export function linkAbort(parent: AbortSignal, child: AbortController): () => void {
-  if (parent.aborted) {
-    child.abort(parent.reason);
-    return () => {};
+const NOOP = (): void => {};
+
+/** Forward one source's abort reason until unlinked. */
+export function linkAbort(source: AbortSignal, onAbort: (reason: unknown) => void): () => void {
+  let delivered = false;
+  const deliver = (): void => {
+    if (!delivered) {
+      delivered = true;
+      onAbort(source.reason);
+    }
+  };
+  if (source.aborted) {
+    deliver();
+    return NOOP;
   }
 
-  const subscription = addAbortListener(parent, () => child.abort(parent.reason));
+  const subscription = addAbortListener(source, deliver);
   // Listener installation can itself reenter source cancellation.
-  if (parent.aborted) {
-    child.abort(parent.reason);
+  if (source.aborted) {
+    deliver();
   }
   return () => subscription[Symbol.dispose]();
 }

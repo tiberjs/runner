@@ -6,11 +6,11 @@ export class CancellationBindings implements Disposable {
   private links: Map<AbortSignal, () => void> | undefined;
   private timer: Disposable | undefined;
 
-  link(source: AbortSignal, target: AbortController): void {
-    if (source === target.signal || this.links?.has(source)) {
+  link(source: AbortSignal, onAbort: (reason: unknown) => void): void {
+    if (this.links?.has(source)) {
       return;
     }
-    (this.links ??= new Map()).set(source, linkAbort(source, target));
+    (this.links ??= new Map()).set(source, linkAbort(source, onAbort));
   }
 
   deadline(at: number, onElapsed: () => void): void {

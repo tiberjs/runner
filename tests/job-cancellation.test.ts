@@ -45,28 +45,45 @@ test("cancellation inspection preserves a native-shaped error whose cause getter
     }),
   ).rejects.toBe(failure);
 });
-test("reentrant cancellation during signal linking never starts or leaks an admitted Job", async () => {
+test("children add no abort listeners to their parent and receive its cancellation", async () => {
   const owner = new Job(untilAbort).start();
   const parent = owner.signal;
+  const baseline = getEventListeners(parent, "abort").length;
+  const children = [
+    new Job(untilAbort).start({ parent: owner }),
+    new Job(untilAbort).start({ parent: owner }),
+    new Job(untilAbort).start({ parent: owner }),
+  ];
+  expect(getEventListeners(parent, "abort")).toHaveLength(baseline);
+
+  const reason = new Error("cancel owner");
+  owner.cancel(reason);
+  const results = await Promise.all(children.map((child) => child.result()));
+  expect(results).toEqual(children.map(() => ({ ok: false, error: reason })));
+  await owner.close(reason);
+});
+
+test("reentrant external cancellation never starts or leaks an admitted Job", async () => {
+  const source = new AbortController();
   const reason = new Error("cancel while linking");
-  const add = parent.addEventListener.bind(parent);
+  const add = source.signal.addEventListener.bind(source.signal);
   let ran = false;
-  const registration = vi.spyOn(parent, "addEventListener").mockImplementation((...args) => {
-    owner.cancel(reason);
+  const registration = vi.spyOn(source.signal, "addEventListener").mockImplementation((...args) => {
+    source.abort(reason);
     add(...args);
   });
   try {
-    const task = new Job(() => {
-      ran = true;
-    }).start({ parent: owner });
-    await expect(task.join()).rejects.toBe(reason);
-    await owner.close(reason);
+    const job = new Job(
+      () => {
+        ran = true;
+      },
+      { signal: source.signal },
+    ).start();
+    await expect(job.join()).rejects.toBe(reason);
     expect(ran).toBe(false);
-    expect(owner.size).toBe(0);
-    expect(getEventListeners(parent, "abort")).toEqual([]);
+    expect(getEventListeners(source.signal, "abort")).toEqual([]);
   } finally {
     registration.mockRestore();
-    await owner.close();
   }
 });
 

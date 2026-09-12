@@ -167,12 +167,6 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       deadline: inherited?.deadline,
       attachment: inherited?.attachment,
     };
-    if (this.owner) {
-      (this.cancellation ??= new CancellationBindings()).link(this.owner.signal, this.controller);
-    }
-    if (inherited?.signal) {
-      (this.cancellation ??= new CancellationBindings()).link(inherited.signal, this.controller);
-    }
     const entries = this.seed?.values;
     const externalSignal = this.seed?.signal;
     const requestedDeadline = this.seed?.deadline;
@@ -197,8 +191,25 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       deadline,
       attachment,
     };
-    if (externalSignal && externalSignal !== this.signal) {
-      (this.cancellation ??= new CancellationBindings()).link(externalSignal, this.controller);
+    const ownerSignal = this.owner?.signal;
+    const inheritedSignal = inherited?.signal;
+    const receivesInherited =
+      inheritedSignal !== undefined &&
+      inheritedSignal !== ownerSignal &&
+      inheritedSignal !== this.signal;
+    const receivesExternal =
+      externalSignal !== undefined &&
+      externalSignal !== ownerSignal &&
+      externalSignal !== this.signal;
+    if (receivesInherited || receivesExternal) {
+      const cancellation = (this.cancellation ??= new CancellationBindings());
+      const cancel = (reason: unknown): void => this.cancel(reason);
+      if (receivesInherited) {
+        cancellation.link(inheritedSignal, cancel);
+      }
+      if (receivesExternal) {
+        cancellation.link(externalSignal, cancel);
+      }
     }
     const ownerDeadline = this.owner?.context.deadline;
     if (deadline !== undefined && (ownerDeadline === undefined || deadline < ownerDeadline)) {
