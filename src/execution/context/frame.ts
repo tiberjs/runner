@@ -1,11 +1,41 @@
 import type { ContextEntry } from "./key.js";
 
-function entryMap(entries: readonly ContextEntry[]): Map<PropertyKey, unknown> {
+/** What a frame needs from its own bindings; `Map` satisfies it for many, one object for one. */
+interface Bindings {
+  has(key: PropertyKey): boolean;
+  get(key: PropertyKey): unknown;
+  keys(): Iterable<PropertyKey>;
+}
+
+/** The common case — one binding per frame — without a hash table. */
+class SingleBinding implements Bindings {
+  constructor(
+    private readonly key: PropertyKey,
+    private readonly value: unknown,
+  ) {}
+
+  has(key: PropertyKey): boolean {
+    return key === this.key;
+  }
+
+  get(key: PropertyKey): unknown {
+    return key === this.key ? this.value : undefined;
+  }
+
+  *keys(): Iterable<PropertyKey> {
+    yield this.key;
+  }
+}
+
+function bindingsOf(entries: readonly ContextEntry[]): Bindings {
+  if (entries.length === 1) {
+    const [key, value] = entries[0]!;
+    return new SingleBinding(key.id, value);
+  }
   const values = new Map<PropertyKey, unknown>();
   for (const [key, value] of entries) {
     values.set(key.id, value);
   }
-
   return values;
 }
 
@@ -19,9 +49,9 @@ function entryMap(entries: readonly ContextEntry[]): Map<PropertyKey, unknown> {
  */
 export class ContextFrame {
   readonly #parent: ContextFrame | null;
-  readonly #own: ReadonlyMap<PropertyKey, unknown>;
+  readonly #own: Bindings;
 
-  private constructor(parent: ContextFrame | null, own: ReadonlyMap<PropertyKey, unknown>) {
+  private constructor(parent: ContextFrame | null, own: Bindings) {
     this.#parent = parent;
     this.#own = own;
   }
@@ -31,7 +61,7 @@ export class ContextFrame {
 
   /** Create a root frame containing the supplied context bindings. */
   static from(entries: readonly ContextEntry[]): ContextFrame {
-    return entries.length === 0 ? ContextFrame.empty : new ContextFrame(null, entryMap(entries));
+    return entries.length === 0 ? ContextFrame.empty : new ContextFrame(null, bindingsOf(entries));
   }
 
   get(key: PropertyKey): unknown {
@@ -62,18 +92,20 @@ export class ContextFrame {
     if (keys.length === 0) {
       return this;
     }
-
+    if (keys.length === 1) {
+      const key = keys[0]!;
+      return new ContextFrame(this, new SingleBinding(key, values[key]));
+    }
     const own = new Map<PropertyKey, unknown>();
     for (const key of keys) {
-      own.set(key, (values as Record<PropertyKey, unknown>)[key]);
+      own.set(key, values[key]);
     }
-
     return new ContextFrame(this, own);
   }
 
   /** Return a child frame containing the supplied context bindings. */
   withEntries(entries: readonly ContextEntry[]): ContextFrame {
-    return entries.length === 0 ? this : new ContextFrame(this, entryMap(entries));
+    return entries.length === 0 ? this : new ContextFrame(this, bindingsOf(entries));
   }
 
   keys(): IterableIterator<PropertyKey> {
