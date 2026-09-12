@@ -44,6 +44,82 @@ test("a fork cannot settle before its nested child", async () => {
   });
 });
 
+test("a Job can publish its value before its body and descendants settle", async () => {
+  const releaseBody = Promise.withResolvers<void>();
+  const releaseChild = Promise.withResolvers<void>();
+  const childStarted = Promise.withResolvers<void>();
+  let settled = false;
+  const job = new Job<number, string>(async (publish) => {
+    fork(async () => {
+      childStarted.resolve();
+      await releaseChild.promise;
+    });
+    publish(Promise.resolve("ready"));
+    expect(() => publish("again")).toThrowError(TypeError);
+    await releaseBody.promise;
+    return 7;
+  }).start();
+  const completion = job.then((value) => {
+    settled = true;
+    return value;
+  });
+
+  await childStarted.promise;
+  expect(await job.value()).toBe("ready");
+  expect(settled).toBe(false);
+  releaseBody.resolve();
+  await nextTurn();
+  expect(settled).toBe(false);
+  releaseChild.resolve();
+  expect(await completion).toBe(7);
+});
+
+test("value rejects when a Job settles before publishing", async () => {
+  const unreported = new Job(() => 42);
+  const missing = unreported.value();
+  unreported.start();
+  await expect(missing).rejects.toBeInstanceOf(LifecycleStateError);
+  expect(await unreported).toBe(42);
+
+  const failure = new Error("before publication");
+  const failed = new Job(() => {
+    throw failure;
+  });
+  const value = failed.value();
+  failed.start();
+  await expect(value).rejects.toBe(failure);
+});
+
+test("a cancelled Job still publishes the answer its body owes", async () => {
+  const childFailure = new Error("child");
+  const released = Promise.withResolvers<void>();
+  const job = new Job<void, string>(async (publish) => {
+    fork(() => {
+      throw childFailure;
+    });
+    await nextTurn();
+    // The child's failure has cancelled this Job; the answer is still owed.
+    expect(signal().aborted).toBe(true);
+    publish("mapped");
+    await released.promise;
+  }).start();
+
+  expect(await job.value()).toBe("mapped");
+  released.resolve();
+  expect(await job.result()).toEqual({ ok: false, error: childFailure });
+});
+
+test("a rejected publication does not replace the Job's lifetime result", async () => {
+  const publicationFailure = new Error("publication");
+  const job = new Job<number, string>((publish) => {
+    publish(Promise.reject(publicationFailure));
+    return 42;
+  }).start();
+
+  await expect(job.value()).rejects.toBe(publicationFailure);
+  expect(await job).toBe(42);
+});
+
 test("successful completion joins naturally without cancelling body or child signals", async () => {
   let body!: AbortSignal;
   let child!: AbortSignal;
@@ -200,8 +276,10 @@ test("self and descendant result observations reject without replacing the owner
   const job = new Job(async () => {
     const owner = currentState().job;
     expect(() => owner.result()).toThrowError(LifecycleDependencyError);
+    expect(() => owner.value()).toThrowError(LifecycleDependencyError);
     return await fork(() => {
       expect(() => owner.result()).toThrowError(LifecycleDependencyError);
+      expect(() => owner.value()).toThrowError(LifecycleDependencyError);
       return 42;
     });
   });
@@ -286,6 +364,69 @@ test("owners can join children without closing admission, but descendants cannot
     expect(completed).toBe(true);
     expect(await fork(() => "admitted")).toBe("admitted");
   });
+});
+
+test("an owner can cancel and join its descendants without cancelling itself or sealing admission", async () => {
+  const reason = new Error("stop descendants");
+  await execute(async () => {
+    const owner = currentState().job;
+    const entered = Promise.withResolvers<void>();
+    const cleaning = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let cancelled = false;
+    const child = fork(async () => {
+      entered.resolve();
+      try {
+        await untilCancelled();
+      } finally {
+        cancelled = true;
+        cleaning.resolve();
+        await release.promise;
+      }
+    });
+
+    await entered.promise;
+    let joined = false;
+    const cancelling = owner.cancelChildren(reason).then(() => {
+      joined = true;
+    });
+    await cleaning.promise;
+    expect(cancelled).toBe(true);
+    expect(joined).toBe(false);
+    expect(signal().aborted).toBe(false);
+    release.resolve();
+    await cancelling;
+    expect(await child.result()).toEqual({ ok: false, error: reason });
+    expect(await fork(() => "admitted")).toBe("admitted");
+  });
+});
+
+test("a descendant cannot cancel and join its owner's children", async () => {
+  await execute(async () => {
+    const owner = currentState().job;
+    await fork(async () => {
+      await expect(owner.cancelChildren()).rejects.toBeInstanceOf(LifecycleDependencyError);
+    });
+  });
+});
+
+test("reconcileFailure replaces cancellation with the recorded failure and retains other errors", async () => {
+  const childFailure = new Error("child");
+  const job = new Job(async () => {
+    fork(() => {
+      throw childFailure;
+    });
+    await untilCancelled();
+    signal().throwIfAborted();
+  }).start();
+  await job.result();
+
+  expect(job.reconcileFailure(job.signal.reason)).toBe(childFailure);
+  const caught = new Error("caught");
+  const reconciled = job.reconcileFailure(caught) as AggregateError;
+  expect(reconciled).toBeInstanceOf(AggregateError);
+  expect(reconciled.errors).toEqual([caught, childFailure]);
+  expect(new Job(() => undefined).reconcileFailure(caught)).toBe(caught);
 });
 
 test("a cold Job cannot be consumed or restarted, and cold close never runs its body", async () => {

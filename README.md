@@ -30,12 +30,13 @@ const result = await execute(async () => {
 - `fork()` starts a child of the current Job. `new Job(body).start()` does the same inside an execution, or starts a root outside one.
 - `start({ parent })` selects an explicit owner and inherits that owner's context. `start({ parent: undefined })` starts an independent root.
 - `cancel(reason)` requests cooperative cancellation. It does not mean the work has finished.
+- `value()` observes a value published by the body without waiting for descendants. It rejects if the Job settles without invoking its publisher.
 - `join()` and `await job` observe the complete result. Awaiting a cold Job rejects; awaiting never starts it.
 - `finish()` stops admission of direct children and joins without cancellation. `close(reason)` stops admission, cancels, and joins. Repeated `close()` calls share their result.
 - `close()` ignores expected cancellation but rejects genuine execution or finalizer failures. Jobs support `await using`.
 - Natural body completion stops direct-child admission but does not cancel existing descendants.
 - An ordinary child failure propagates to its owner and cancels siblings, even if the child is awaited and its rejection is caught. `execute()` and `timeout()` create lexical failure boundaries: catching their rejection leaves the enclosing Job usable.
-- A Job cannot await itself or an ancestor. Its body may use `joinChildren()` to wait for its descendants without completing itself.
+- A Job cannot await itself or an ancestor. Its body may use `joinChildren()` to wait for descendants or `cancelChildren(reason)` to cancel and join them without cancelling itself.
 
 `job.state` is `"created"`, `"running"`, `"closing"`, or `"closed"`. `job.parent` is its actual owner; `job.size` counts active direct children.
 
@@ -55,6 +56,28 @@ if (result.ok) {
 ```
 
 Use `ok` to distinguish success from failure: both a successful value and a thrown error may be `undefined`. Self/ancestor observation is still an invalid lifecycle dependency; `result()` rejects that operation by throwing synchronously.
+
+The body receives a single-use publisher. `Job<Result, Published = Result>` keeps the
+published value's type separate from the body's eventual result. Publication remains
+available after cancellation so a body can publish a mapped answer, and the publisher
+accepts a promise when publication itself completes asynchronously:
+
+```ts
+const ended = Promise.withResolvers<void>();
+const request = new Job<void, Response>(async (publish) => {
+  publish(new Response("streaming"));
+  await ended.promise;
+});
+
+request.start();
+const response = await request.value(); // The Job is still running.
+ended.resolve();
+await request; // The complete lifetime.
+```
+
+`reconcileFailure(error)` replaces the Job's cancellation reason with genuine failures
+already recorded from its descendants. An independent caught error and recorded failure
+are preserved together in an `AggregateError`.
 
 Use native `try/finally`, `using`, or `await using` for resources. Body-local cleanup has its ordinary lexical lifetime. If a resource must outlive an entire subtree, acquire it outside the awaited Job or `execute()` call.
 

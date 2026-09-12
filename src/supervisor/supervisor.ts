@@ -12,12 +12,12 @@ export interface SupervisorOptions {
 type Handler<T> = () => T | PromiseLike<T>;
 
 /** Optional admission and failure policy for an ordinary, explicitly supplied Job. */
-export class Supervisor<T = unknown> implements AsyncDisposable {
-  readonly job: Job<T>;
+export class Supervisor<T = unknown, Published = T> implements AsyncDisposable {
+  readonly job: Job<T, Published>;
   readonly failure: "fail-fast" | "isolate";
   #groupRunner: GroupRunner | undefined;
 
-  constructor(job: Job<T>, options: SupervisorOptions = {}) {
+  constructor(job: Job<T, Published>, options: SupervisorOptions = {}) {
     const failure = options.failure ?? "isolate";
     if (failure !== "fail-fast" && failure !== "isolate") {
       throw new TypeError("Supervisor failure must be fail-fast or isolate.");
@@ -31,7 +31,7 @@ export class Supervisor<T = unknown> implements AsyncDisposable {
     return this.job.state;
   }
 
-  start(options?: JobStartOptions): Job<T> {
+  start(options?: JobStartOptions): Job<T, Published> {
     if (this.job.state !== "created") {
       return this.job;
     }
@@ -40,14 +40,18 @@ export class Supervisor<T = unknown> implements AsyncDisposable {
 
   run<R>(handler: Handler<R>): Job<R>;
   run<R>(seed: ExecutionSeed, handler: Handler<R>): Job<R>;
-  run<R>(job: Job<R>): Job<R>;
+  run<R, Value>(job: Job<R, Value>): Job<R, Value>;
   run<Members extends readonly GroupMember[]>(
     group: TaskGroup<Members>,
   ): Promise<GroupResults<Members>>;
-  run<R>(
-    input: ExecutionSeed | Handler<R> | Job<R> | TaskGroup<readonly GroupMember[]>,
-    handler?: Handler<R>,
-  ): Job<R> | Promise<unknown[]> {
+  run(
+    input:
+      | ExecutionSeed
+      | Handler<unknown>
+      | Job<unknown, unknown>
+      | TaskGroup<readonly GroupMember[]>,
+    handler?: Handler<unknown>,
+  ): Job<unknown, unknown> | Promise<unknown[]> {
     if (this.job.state !== "running" || this.job.signal.aborted) {
       throw new LifecycleStateError("Supervisor", "run", this.state);
     }
@@ -80,7 +84,7 @@ export class Supervisor<T = unknown> implements AsyncDisposable {
   }
 
   /** @internal Decide propagation from an actual child's genuine failure. */
-  childFailed(child: Job<unknown>): boolean {
+  childFailed(child: Job<unknown, unknown>): boolean {
     const propagate = this.#groupRunner?.childFailed(child) ?? true;
     return propagate && this.failure === "fail-fast";
   }
