@@ -40,7 +40,7 @@ export class Supervisor<T = unknown> implements AsyncDisposable {
 
   run<R>(handler: Handler<R>): Job<R>;
   run<R>(seed: ExecutionSeed, handler: Handler<R>): Job<R>;
-  run<R>(job: Job<R>): Job<R>;
+  run<J extends Job<unknown>>(job: J): J;
   run<Members extends readonly GroupMember[]>(
     group: TaskGroup<Members>,
   ): Promise<GroupResults<Members>>;

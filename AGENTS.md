@@ -16,6 +16,7 @@ Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or opti
 ## Public contracts
 
 - `Job` is a cold, single-use execution and awaitable lifetime node. It settles only after its body and actual descendants finish.
+- `HandoffJob` is a Job whose body offers one value and suspends until the consumer resumes it. The handoff is rendezvous state released by the Job's own cancellation and closure; it owns no lifetime, signal, or queue.
 - `Supervisor` manages a supplied ordinary Job. It does not create hidden startup, background, or shutdown owners.
 - `Supervisor.start(options)` follows `Job.start(options)` ownership and context rules. Use `{ parent: undefined }` to explicitly select an independent root; Supervisor state is its Job state.
 - Applications own initialization order and error reporting. Do not add readiness handshakes, automatic logging, or reporting callbacks to the execution core.

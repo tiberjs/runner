@@ -66,6 +66,33 @@ are preserved together in an `AggregateError`.
 
 Use native `try/finally`, `using`, or `await using` for resources. Body-local cleanup has its ordinary lexical lifetime. If a resource must outlive an entire subtree, acquire it outside the awaited Job or `execute()` call.
 
+### Handing a value over mid-execution
+
+A `HandoffJob` is a Job whose body hands one value to a consumer before its work is
+done and suspends until that consumer answers. The Job's lifetime is unchanged: it still
+settles only after its body and descendants finish. A handoff has no queue, buffering,
+repeated delivery, or hidden work; it is one value and one answer.
+
+```ts
+import { HandoffJob } from "@tiberjs/runner";
+
+const exchange = new HandoffJob<void, Response, "delivered" | "aborted">(async (handoff) => {
+  const response = await prepare();
+  const outcome = await handoff.offer(response); // suspended until resume()
+  await release(outcome);
+});
+
+exchange.start();
+const response = await exchange.receive(); // the Job is still running
+exchange.resume(await deliver(response));
+await exchange; // body and descendants have settled
+```
+
+- `offer()` and `resume()` are each accepted once; a second call throws `TypeError`.
+- Cancelling the Job while its body is suspended rejects the pending `offer()` with the cancellation reason, so an abandoned consumer cannot keep a closing Job suspended. An offer made after cancellation still reaches the consumer and rejects immediately for the body. A `resume()` after that release is discarded.
+- A Job that closes without offering rejects `receive()` with its failure. A body that returns without offering fails with `TypeError`.
+- `receive()` rejects self/ancestor observation synchronously, like `result()`.
+
 ## Supervision
 
 A `Supervisor` manages an ordinary Job supplied by the caller. It directs submissions to that Job and applies failure policy. The application decides when initialization has finished and when to submit subsequent work.

@@ -6,6 +6,7 @@ import { isCancellation } from "./abort.js";
 import { CancellationBindings } from "./cancellation-bindings.js";
 import { FailureSet } from "./failure-set.js";
 import { peekState, runWith, withoutExecution } from "../execution/state.js";
+import type { OwnedHandoff } from "./handoff.js";
 
 export interface JobStartOptions {
   readonly parent?: Job<unknown>;
@@ -34,6 +35,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
   private failures: FailureSet | undefined;
   private cancellation: CancellationBindings | undefined;
   private closing: Promise<void> | undefined;
+  private handoff: OwnedHandoff | undefined;
 
   constructor(
     private readonly body: () => T | PromiseLike<T>,
@@ -104,6 +106,14 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
       throw new LifecycleStateError("Job", "manage", this.phase);
     }
     this.supervisor = supervisor;
+  }
+
+  /** @internal Bind a HandoffJob's rendezvous so cancellation and closure release it. */
+  attach(handoff: OwnedHandoff): void {
+    if (this.phase !== "created" || this.handoff) {
+      throw new LifecycleStateError("Job", "attach", this.phase);
+    }
+    this.handoff = handoff;
   }
 
   start(options: JobStartOptions = {}): this {
@@ -208,7 +218,11 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
       value = await runWith({ job: this, context: this.context }, async () => {
         try {
           this.signal.throwIfAborted();
-          return await this.body();
+          const value = await this.body();
+          if (this.handoff && !this.handoff.hasOffered) {
+            throw new TypeError("HandoffJob body completed without offering a value.");
+          }
+          return value;
         } catch (error) {
           // Capture before a caller can cancel with this same value.
           this.recordFailure(error);
@@ -281,6 +295,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
         continue;
       }
       job.controller.abort(received);
+      job.handoff?.release(job.signal.reason);
       for (const child of job.children ?? []) {
         jobs.push(child);
         reasons.push(job.signal.reason);
@@ -288,7 +303,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     }
   }
 
-  private dependency(operation: string): LifecycleDependencyError | undefined {
+  protected dependency(operation: string): LifecycleDependencyError | undefined {
     return this.owns(peekState()?.job)
       ? new LifecycleDependencyError("Job", operation, "Job")
       : undefined;
@@ -400,6 +415,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     this.cancellation?.[Symbol.dispose]();
     this.cancellation = undefined;
     this.owner?.children?.delete(this);
+    this.handoff?.settle(result);
     this.settled.resolve(result);
   }
 

@@ -25,5 +25,7 @@ export {
 
 export { Job } from "./job/job.js";
 export type { JobStartOptions, JobState, JobResult } from "./job/job.js";
+export { HandoffJob } from "./job/handoff-job.js";
+export type { Handoff } from "./job/handoff.js";
 export { TaskGroup } from "./supervisor/task-group.js";
 export type { TaskGroupOptions, GroupMember, GroupResults } from "./supervisor/task-group.js";
