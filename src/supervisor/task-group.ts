@@ -1,9 +1,9 @@
 import type { Job } from "../job/job.js";
 
-export type GroupMember = Job<unknown, unknown> | TaskGroup<readonly GroupMember[]>;
+export type GroupMember = Job<unknown> | TaskGroup<readonly GroupMember[]>;
 
 export type GroupResults<Members extends readonly GroupMember[]> = {
-  -readonly [Index in keyof Members]: Members[Index] extends Job<infer Result, infer _Published>
+  -readonly [Index in keyof Members]: Members[Index] extends Job<infer Result>
     ? Result
     : Members[Index] extends TaskGroup<infer Nested>
       ? GroupResults<Nested>

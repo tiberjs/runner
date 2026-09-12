@@ -9,12 +9,12 @@ const GROUP_FAILED = new DOMException("A TaskGroup member failed", "AbortError")
 
 /** Submission metadata and policy only; every leaf belongs to the supplied owner. */
 export class GroupRunner {
-  readonly #members = new Map<Job<unknown, unknown>, GroupBoundary>();
+  readonly #members = new Map<Job<unknown>, GroupBoundary>();
 
-  constructor(private readonly owner: Job<unknown, unknown>) {}
+  constructor(private readonly owner: Job<unknown>) {}
 
   /** Apply declaration policy before the Supervisor decides root propagation. */
-  childFailed(child: Job<unknown, unknown>): boolean {
+  childFailed(child: Job<unknown>): boolean {
     let boundary = this.#members.get(child);
     while (boundary) {
       if (boundary.failure === "isolate") {

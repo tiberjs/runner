@@ -30,7 +30,6 @@ const result = await execute(async () => {
 - `fork()` starts a child of the current Job. `new Job(body).start()` does the same inside an execution, or starts a root outside one.
 - `start({ parent })` selects an explicit owner and inherits that owner's context. `start({ parent: undefined })` starts an independent root.
 - `cancel(reason)` requests cooperative cancellation. It does not mean the work has finished.
-- `value()` observes a value published by the body without waiting for descendants. It rejects if the Job settles without invoking its publisher.
 - `join()` and `await job` observe the complete result. Awaiting a cold Job rejects; awaiting never starts it.
 - `finish()` stops admission of direct children and joins without cancellation. `close(reason)` stops admission, cancels, and joins. Repeated `close()` calls share their result.
 - `close()` ignores expected cancellation but rejects genuine execution or finalizer failures. Jobs support `await using`.
@@ -55,27 +54,7 @@ if (result.ok) {
 }
 ```
 
-Use `ok` to distinguish success from failure: both a successful value and a thrown error may be `undefined`. `result()` and `value()` reject self/ancestor observation synchronously.
-
-The body receives a publisher that may be called once while the body is running.
-`Job<Result, Published = Result>` keeps the published value's type separate from the
-body's eventual result. The publisher accepts a value or `PromiseLike` value.
-Cancellation does not disable publication; `result()` and `await job` still report the
-Job's final success or failure independently.
-
-```ts
-const release = Promise.withResolvers<void>();
-const job = new Job<number, string>(async (publish) => {
-  publish("ready");
-  await release.promise;
-  return 42;
-});
-
-job.start();
-console.log(await job.value()); // "ready"; the Job is still running.
-release.resolve();
-console.log(await job); // 42; the body and descendants have settled.
-```
+Use `ok` to distinguish success from failure: both a successful value and a thrown error may be `undefined`. `result()` rejects self/ancestor observation synchronously.
 
 `cancelChildren(reason)` cancels direct children, lets cancellation cascade through
 their descendants, and resolves after those child lifetimes settle. It does not cancel
