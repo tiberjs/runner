@@ -219,7 +219,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
         try {
           this.signal.throwIfAborted();
           const value = await this.body();
-          if (this.handoff && !this.handoff.hasOffered) {
+          if (this.handoff && !this.handoff.offered) {
             throw new TypeError("HandoffJob body completed without offering a value.");
           }
           return value;
@@ -415,7 +415,9 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     this.cancellation?.[Symbol.dispose]();
     this.cancellation = undefined;
     this.owner?.children?.delete(this);
-    this.handoff?.settle(result);
+    if (this.handoff && !this.handoff.offered && !result.ok) {
+      this.handoff.settle(result.error);
+    }
     this.settled.resolve(result);
   }
 

@@ -79,11 +79,27 @@ test("failure before an offer rejects the receiver with the composed Job failure
   await expect(received).rejects.toMatchObject({ errors: [childFailure, bodyFailure] });
 });
 
-test("a body that completes without offering fails instead of succeeding", async () => {
+test("a body that completes without offering fails, and its receiver fails with the same error", async () => {
   const job = new HandoffJob<number, string, void>(() => 42).start();
 
-  await expect(job.receive()).rejects.toBeInstanceOf(TypeError);
-  await expect(job).rejects.toBeInstanceOf(TypeError);
+  const result = await job.result();
+  if (result.ok) {
+    throw new Error("expected the Job to fail");
+  }
+  expect(result.error).toBeInstanceOf(TypeError);
+  await expect(job.receive()).rejects.toBe(result.error);
+});
+
+test("a failed HandoffJob that nobody receives from does not raise an unhandled rejection", async () => {
+  const failure = new Error("unobserved");
+  const job = new HandoffJob<void, string, void>(() => {
+    throw failure;
+  }).start();
+
+  expect(await job.result()).toEqual({ ok: false, error: failure });
+  await nextTurn();
+  // A late receiver still learns why no value arrived.
+  await expect(job.receive()).rejects.toBe(failure);
 });
 
 test("cancellation releases a body suspended in its offer with the original reason", async () => {
@@ -100,10 +116,11 @@ test("cancellation releases a body suspended in its offer with the original reas
 
   expect(await job.receive()).toBe("value");
   job.cancel(reason);
-  await job.result();
+  expect(await job.result()).toEqual({ ok: false, error: reason });
   expect(released).toBe(reason);
   // A late acknowledgement is discarded rather than rejected.
   job.resume("late");
+  expect(() => job.resume("twice")).toThrowError(TypeError);
 });
 
 test("an offer made after cancellation still reaches the consumer without suspending the body", async () => {
@@ -154,24 +171,26 @@ test("owner cancellation cascades into a supervised HandoffJob's suspended offer
   expect(job.state).toBe("closed");
 });
 
-test("independent delivery and cleanup failures keep their identities", async () => {
+test("a resumed answer is the body's to interpret; only what the body raises fails the Job", async () => {
   const delivery = new Error("delivery");
   const cleanup = new Error("cleanup");
-  const job = new HandoffJob<void, string, { readonly error: unknown }>(async (handoff) => {
-    const outcome = await handoff.offer("value");
-    try {
-      throw cleanup;
-    } catch (error) {
-      throw new AggregateError([outcome.error, error], "delivery and cleanup failed");
-    }
-  }).start();
+  type Outcome = { readonly error?: unknown };
 
-  expect(await job.receive()).toBe("value");
-  job.resume({ error: delivery });
-  await expect(job.result()).resolves.toMatchObject({
-    ok: false,
-    error: { errors: [delivery, cleanup] },
-  });
+  const tolerant = new HandoffJob<string, string, Outcome>(async (handoff) => {
+    const outcome = await handoff.offer("value");
+    return outcome.error === delivery ? "tolerated" : "unexpected";
+  }).start();
+  expect(await tolerant.receive()).toBe("value");
+  tolerant.resume({ error: delivery });
+  expect(await tolerant.result()).toEqual({ ok: true, value: "tolerated" });
+
+  const strict = new HandoffJob<void, string, Outcome>(async (handoff) => {
+    await handoff.offer("value");
+    throw cleanup;
+  }).start();
+  expect(await strict.receive()).toBe("value");
+  strict.resume({ error: delivery });
+  expect(await strict.result()).toEqual({ ok: false, error: cleanup });
 });
 
 test("receive rejects self and descendant observation synchronously", async () => {

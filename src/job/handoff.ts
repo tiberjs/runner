@@ -1,5 +1,3 @@
-import type { JobResult } from "./job.js";
-
 /** The body's side of a one-shot, two-way rendezvous. */
 export interface Handoff<Offered, Resumed> {
   /**
@@ -13,49 +11,45 @@ export interface Handoff<Offered, Resumed> {
 
 /** What a Job needs from its rendezvous: offer bookkeeping plus release on cancellation and closure. */
 export interface OwnedHandoff {
-  readonly hasOffered: boolean;
+  readonly offered: boolean;
   release(reason: unknown): void;
-  settle(result: JobResult<unknown>): void;
+  settle(failure: unknown): void;
 }
 
 /** Rendezvous state owned by one HandoffJob: no Job, signal, queue, or hidden work. */
-export class HandoffState<Offered, Resumed> implements Handoff<Offered, Resumed> {
-  private readonly offered = Promise.withResolvers<Offered>();
-  private readonly resumed = Promise.withResolvers<Resumed>();
-  private offering = false;
-  private resuming = false;
-  private observed = false;
+export class HandoffState<Offered, Resumed> implements Handoff<Offered, Resumed>, OwnedHandoff {
+  private readonly value = Promise.withResolvers<Offered>();
+  private readonly answer = Promise.withResolvers<Resumed>();
+  offered = false;
+  private resumed = false;
+  private received = false;
   private released = false;
   private releaseReason: unknown;
 
-  get hasOffered(): boolean {
-    return this.offering;
-  }
-
   offer(value: Offered): Promise<Resumed> {
-    if (this.offering) {
+    if (this.offered) {
       throw new TypeError("Handoff.offer() may only be called once.");
     }
-    this.offering = true;
-    this.offered.resolve(value);
+    this.offered = true;
+    this.value.resolve(value);
     if (this.released) {
       // The consumer still receives the answer; the body is not kept waiting for it.
-      this.resumed.reject(this.releaseReason);
+      this.answer.reject(this.releaseReason);
     }
-    return this.resumed.promise;
+    return this.answer.promise;
   }
 
   receive(): Promise<Offered> {
-    this.observed = true;
-    return this.offered.promise;
+    this.received = true;
+    return this.value.promise;
   }
 
   resume(value: Resumed): void {
-    if (this.resuming) {
+    if (this.resumed) {
       throw new TypeError("Handoff.resume() may only be called once.");
     }
-    this.resuming = true;
-    this.resumed.resolve(value);
+    this.resumed = true;
+    this.answer.resolve(value);
   }
 
   /** Cancellation: release a body suspended in `offer()`, now or when it offers. */
@@ -65,22 +59,17 @@ export class HandoffState<Offered, Resumed> implements Handoff<Offered, Resumed>
     }
     this.released = true;
     this.releaseReason = reason;
-    if (this.offering) {
-      this.resumed.reject(reason);
+    if (this.offered) {
+      this.answer.reject(reason);
     }
   }
 
-  /** Closure: a Job that closed without offering answers its consumer with its failure. */
-  settle(result: JobResult<unknown>): void {
-    if (this.offering) {
-      return;
-    }
-    this.offering = true;
-    this.offered.reject(
-      result.ok ? new TypeError("HandoffJob closed without offering a value.") : result.error,
-    );
-    if (!this.observed) {
-      void this.offered.promise.catch(() => {});
+  /** Closure without an offer: the consumer receives the Job's failure instead. */
+  settle(failure: unknown): void {
+    this.offered = true;
+    this.value.reject(failure);
+    if (!this.received) {
+      void this.value.promise.catch(() => {});
     }
   }
 }
