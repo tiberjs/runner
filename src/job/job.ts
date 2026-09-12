@@ -6,7 +6,7 @@ import { isCancellation } from "./abort.js";
 import { CancellationBindings } from "./cancellation-bindings.js";
 import { FailureSet } from "./failure-set.js";
 import { peekState, runWith, withoutExecution } from "../execution/state.js";
-import type { OwnedHandoff } from "./handoff.js";
+import type { CancellationOwner, OwnedHandoff } from "./handoff.js";
 
 export interface JobStartOptions {
   readonly parent?: Job<unknown>;
@@ -22,7 +22,7 @@ export type JobResult<T> =
 const CHILD_FAILED = new DOMException("A child job failed", "AbortError");
 
 /** A cold, single-use execution that settles once its body and descendants finish. */
-export class Job<T> implements PromiseLike<T>, AsyncDisposable {
+export class Job<T> implements PromiseLike<T>, AsyncDisposable, CancellationOwner {
   private readonly controller = new AbortController();
   private readonly settled = Promise.withResolvers<JobResult<unknown>>();
   private children: Set<Job<unknown>> | undefined;
@@ -34,6 +34,9 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
   private propagateFailureToParent = false;
   private failures: FailureSet | undefined;
   private cancellation: CancellationBindings | undefined;
+  // External sources are linked only once this Job's cancellation becomes observable.
+  private pendingInherited: AbortSignal | undefined;
+  private pendingExternal: AbortSignal | undefined;
   private closing: Promise<void> | undefined;
   private handoff: OwnedHandoff | undefined;
 
@@ -57,7 +60,14 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     return this.executionContext;
   }
 
+  /**
+   * This Job's cancellation signal. Reading it is the observation that links
+   * the Job to its external cancellation sources.
+   */
   get signal(): AbortSignal {
+    if (this.pendingInherited !== undefined || this.pendingExternal !== undefined) {
+      this.observeCancellation();
+    }
     return this.controller.signal;
   }
 
@@ -82,7 +92,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
       return error;
     }
     const failure = failures.value;
-    return Object.is(error, failure) || Object.is(error, this.signal.reason)
+    return Object.is(error, failure) || Object.is(error, this.controller.signal.reason)
       ? failure
       : combinedError([error, failure], "Job rejection and execution failed.");
   }
@@ -148,17 +158,22 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   private isExternalCancellationSource(source: AbortSignal | undefined): source is AbortSignal {
-    return source !== undefined && source !== this.signal && source !== this.owner?.signal;
+    return (
+      source !== undefined &&
+      source !== this.controller.signal &&
+      source !== this.owner?.controller.signal
+    );
   }
 
   private prepare(inherited: ExecutionContext | undefined): void {
-    // Ownership is committed; seed access and abort delivery see a base context.
-    this.executionContext = {
-      values: inherited?.values ?? ContextFrame.empty,
-      signal: this.signal,
-      deadline: inherited?.deadline,
-      attachment: inherited?.attachment,
-    };
+    // The Job is already running: a seed accessor may start a child under it, and a
+    // running Job always has a context.
+    this.executionContext = new JobContext(
+      this,
+      inherited?.values ?? ContextFrame.empty,
+      inherited?.deadline,
+      inherited?.attachment,
+    );
     const entries = this.seed?.values;
     const externalSignal = this.seed?.signal;
     const requestedDeadline = this.seed?.deadline;
@@ -172,39 +187,73 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
         ? inherited?.deadline
         : Math.min(requestedDeadline, inherited?.deadline ?? Infinity);
     const base = inherited?.values ?? ContextFrame.empty;
-    this.executionContext = {
-      values:
-        entries instanceof ContextFrame
-          ? entries
-          : entries === undefined
-            ? base
-            : base.withEntries(entries),
-      signal: this.signal,
+    this.executionContext = new JobContext(
+      this,
+      entries instanceof ContextFrame
+        ? entries
+        : entries === undefined
+          ? base
+          : base.withEntries(entries),
       deadline,
       attachment,
-    };
+    );
     const inheritedSignal = inherited?.signal;
-    const receivesInherited = this.isExternalCancellationSource(inheritedSignal);
-    const receivesExternal = this.isExternalCancellationSource(externalSignal);
-    if (!this.signal.aborted && (receivesInherited || receivesExternal)) {
-      const cancellation = (this.cancellation ??= new CancellationBindings());
-      const cancel = (reason: unknown): void => this.cancel(reason);
-      if (receivesInherited) {
-        cancellation.link(inheritedSignal, cancel);
-      }
-      if (receivesExternal && !this.signal.aborted) {
-        cancellation.link(externalSignal, cancel);
-      }
+    if (this.isExternalCancellationSource(inheritedSignal)) {
+      this.pendingInherited = inheritedSignal;
     }
+    if (this.isExternalCancellationSource(externalSignal)) {
+      this.pendingExternal = externalSignal;
+    }
+    this.recheckCancellation();
     const ownerDeadline = this.owner?.context.deadline;
     if (
-      !this.signal.aborted &&
+      !this.controller.signal.aborted &&
       deadline !== undefined &&
       (ownerDeadline === undefined || deadline < ownerDeadline)
     ) {
       (this.cancellation ??= new CancellationBindings()).deadline(deadline, () => {
         this.cancel(new DOMException("Job deadline exceeded", "TimeoutError"));
       });
+    }
+  }
+
+  /** Subscribe to the external sources now that this Job's cancellation is observable. */
+  private observeCancellation(): void {
+    const inherited = this.pendingInherited;
+    const external = this.pendingExternal;
+    this.pendingInherited = undefined;
+    this.pendingExternal = undefined;
+    const signal = this.controller.signal;
+    if (this.phase === "closed" || signal.aborted) {
+      return;
+    }
+    const cancellation = (this.cancellation ??= new CancellationBindings());
+    const cancel = (reason: unknown): void => this.cancel(reason);
+    if (inherited !== undefined) {
+      cancellation.link(inherited, cancel);
+    }
+    // Linking an already-aborted inherited source cancels synchronously.
+    if (external !== undefined && !signal.aborted) {
+      cancellation.link(external, cancel);
+    }
+  }
+
+  /**
+   * @internal Honor an external source that aborted while nothing observed this
+   * Job's cancellation, without subscribing to it.
+   */
+  recheckCancellation(): void {
+    if (this.controller.signal.aborted) {
+      return;
+    }
+    const inherited = this.pendingInherited;
+    if (inherited?.aborted) {
+      this.cancel(inherited.reason);
+      return;
+    }
+    const external = this.pendingExternal;
+    if (external?.aborted) {
+      this.cancel(external.reason);
     }
   }
 
@@ -217,7 +266,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
       this.prepare(inherited);
       value = await runWith({ job: this, context: this.context }, async () => {
         try {
-          this.signal.throwIfAborted();
+          this.controller.signal.throwIfAborted();
           const value = await this.body();
           if (this.handoff && !this.handoff.offered) {
             throw new TypeError("HandoffJob body completed without offering a value.");
@@ -229,15 +278,17 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
           throw error;
         }
       });
-      this.signal.throwIfAborted();
+      // An external abort during the body is honored even if nothing observed it.
+      this.recheckCancellation();
+      this.controller.signal.throwIfAborted();
     } catch (error) {
       rejected = true;
       rejection = error;
       this.recordFailure(error);
       this.cancel(error);
       preserveCancellation =
-        isCancellation(error, this.signal) &&
-        this.signal.reason !== CHILD_FAILED &&
+        isCancellation(error, this.controller.signal) &&
+        this.controller.signal.reason !== CHILD_FAILED &&
         !this.failures?.hasRecorded(error);
     }
     this.phase = "closing";
@@ -251,8 +302,8 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
         this.rememberFailure(failure);
       }
       result = { ok: false, error: failure };
-    } else if (rejected || this.signal.aborted) {
-      result = { ok: false, error: rejected ? rejection : this.signal.reason };
+    } else if (rejected || this.controller.signal.aborted) {
+      result = { ok: false, error: rejected ? rejection : this.controller.signal.reason };
     } else {
       result = { ok: true, value };
     }
@@ -260,7 +311,7 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   private recordFailure(error: unknown): void {
-    if (this.failures?.recognizes(error) || isCancellation(error, this.signal)) {
+    if (this.failures?.recognizes(error) || isCancellation(error, this.controller.signal)) {
       return;
     }
     const failures = (this.failures ??= new FailureSet("Job execution failed."));
@@ -295,10 +346,10 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
         continue;
       }
       job.controller.abort(received);
-      job.handoff?.release(job.signal.reason);
+      job.handoff?.release(job.controller.signal.reason);
       for (const child of job.children ?? []) {
         jobs.push(child);
-        reasons.push(job.signal.reason);
+        reasons.push(job.controller.signal.reason);
       }
     }
   }
@@ -414,6 +465,8 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
     this.phase = "closed";
     this.cancellation?.[Symbol.dispose]();
     this.cancellation = undefined;
+    this.pendingInherited = undefined;
+    this.pendingExternal = undefined;
     this.owner?.children?.delete(this);
     if (this.handoff && !this.handoff.offered && !result.ok) {
       this.handoff.settle(result.error);
@@ -423,5 +476,19 @@ export class Job<T> implements PromiseLike<T>, AsyncDisposable {
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+}
+
+/** A Job's context: reading its signal is the Job's observation point. */
+class JobContext implements ExecutionContext {
+  constructor(
+    private readonly job: Job<unknown>,
+    readonly values: ContextFrame,
+    readonly deadline: number | undefined,
+    readonly attachment: unknown,
+  ) {}
+
+  get signal(): AbortSignal {
+    return this.job.signal;
   }
 }

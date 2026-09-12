@@ -27,6 +27,7 @@ Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or opti
 - Do not restore DI, EventBus, tracing, or legacy APIs to this core.
 - Context is immutable. Derive it with `provide(...)`; never introduce a mutable request-style bag.
 - Cancellation and deadlines are live state. Recheck them after awaits and before commitment points.
+- An external cancellation source is linked lazily: reading `job.signal`, `signal()`, or `context.signal`, and starting a child, are the observation points that subscribe. Internal bookkeeping reads the controller's signal and never subscribes. Already-aborted sources are honored by synchronous rechecks before the body, after it, and before a handoff offer.
 - Preserve native error identity and `cause`; use `AggregateError` when independent operation and cleanup failures both matter.
 - Cancellation classification accepts the original signal reason or a Node-style `AbortError` with `code: "ABORT_ERR"` and matching `cause`. An ordinary application error remains a failure even when its cause is the cancellation reason.
 
@@ -68,6 +69,14 @@ must fail.
 - Avoid allocation, copying, and repeated computation on execution paths.
 - Use logical paragraph breaks. Extract helpers for real responsibilities, not line-count targets.
 - Remove obsolete exports and call paths instead of retaining compatibility shims.
+
+## Review before handing off
+
+Every change ends with these three passes; they are not optional cleanup.
+
+- Responsibility: each module, class, and function owns one thing and its name says which. A helper that only forwards, a field that duplicates state held elsewhere, or a method exposed only so another internal caller can reach it is a smell to remove, not to document.
+- Comments: a comment states an invariant, an ownership rule, or a non-obvious reason. Delete comments that narrate the code, repeat a name, or describe behavior the change removed. A stale comment is a bug.
+- Documentation: `README.md` describes the current contract. When behavior, ownership, options, or a lifecycle rule changes, update the prose and examples in the same change, and remove text that describes the old model.
 
 ## Tests and verification
 

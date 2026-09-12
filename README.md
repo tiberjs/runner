@@ -87,6 +87,7 @@ await exchange; // body and descendants have settled
 
 - `offer()` and `resume()` each accept one call; a second throws `TypeError`.
 - Cancellation rejects a pending `offer()` with its reason. An offer after cancellation still reaches `receive()` but rejects for the body. A later `resume()` is discarded.
+- An offer consults the Job's external sources before suspending: one that already aborted rejects the offer. A source that aborts during the suspension releases it only if the body observed `signal()` first; otherwise the consumer's `resume()` ends the suspension and the Job's result still reports the cancellation.
 - A body that returns without offering fails. A Job that closes without offering rejects `receive()` with its failure.
 - `receive()` rejects self/ancestor observation synchronously.
 
@@ -201,6 +202,8 @@ await execute({ values: [provide(Tenant, "outer")] }, async () => {
 ## Cancellation and deadlines
 
 `signal()` returns the current Job's cancellation signal. Pass it to cancellable native APIs, and check it after awaits and before irreversible work. Runner cannot force uncooperative code to stop.
+
+A Job seeded with an external `signal` subscribes to it lazily, the first time its own cancellation is observed: a `signal()` or `job.signal` read, or a child starting. A Job that never observes it registers no listener. An external source that aborted before the body starts, or while it runs, still yields a cancelled result; only the wake-up of code already suspended requires the subscription.
 
 ```ts
 import { setTimeout } from "node:timers/promises";
