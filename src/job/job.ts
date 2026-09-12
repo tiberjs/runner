@@ -159,6 +159,10 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
     return this;
   }
 
+  private isExternalCancellationSource(source: AbortSignal | undefined): source is AbortSignal {
+    return source !== undefined && source !== this.signal && source !== this.owner?.signal;
+  }
+
   private prepare(inherited: ExecutionContext | undefined): void {
     // Ownership is committed; seed access and abort delivery see a base context.
     this.executionContext = {
@@ -191,16 +195,9 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       deadline,
       attachment,
     };
-    const ownerSignal = this.owner?.signal;
     const inheritedSignal = inherited?.signal;
-    const receivesInherited =
-      inheritedSignal !== undefined &&
-      inheritedSignal !== ownerSignal &&
-      inheritedSignal !== this.signal;
-    const receivesExternal =
-      externalSignal !== undefined &&
-      externalSignal !== ownerSignal &&
-      externalSignal !== this.signal;
+    const receivesInherited = this.isExternalCancellationSource(inheritedSignal);
+    const receivesExternal = this.isExternalCancellationSource(externalSignal);
     if (receivesInherited || receivesExternal) {
       const cancellation = (this.cancellation ??= new CancellationBindings());
       const cancel = (reason: unknown): void => this.cancel(reason);
@@ -297,7 +294,6 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
       return;
     }
     this.controller.abort(reason);
-    // Also reach children admitted before signal linking has finished.
     for (const child of this.children ?? []) {
       child.cancel(this.signal.reason);
     }
