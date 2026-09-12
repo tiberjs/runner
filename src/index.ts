@@ -24,6 +24,6 @@ export {
 } from "./execution/context/access.js";
 
 export { Job } from "./job/job.js";
-export type { JobStartOptions, JobState, JobResult } from "./job/job.js";
+export type { JobPublisher, JobStartOptions, JobState, JobResult } from "./job/job.js";
 export { TaskGroup } from "./supervisor/task-group.js";
 export type { TaskGroupOptions, GroupMember, GroupResults } from "./supervisor/task-group.js";

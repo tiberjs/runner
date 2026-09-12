@@ -12,7 +12,7 @@ export interface GroupBoundary {
 }
 
 export interface GroupLeaf {
-  readonly job: Job<unknown>;
+  readonly job: Job<unknown, unknown>;
   readonly boundary: GroupBoundary;
   readonly results: unknown[];
   readonly index: number;
@@ -24,7 +24,7 @@ export function planGroup(group: TaskGroup<readonly GroupMember[]>): {
   results: unknown[];
 } {
   const leaves: GroupLeaf[] = [];
-  const seen = new Set<Job<unknown>>();
+  const seen = new Set<Job<unknown, unknown>>();
 
   const visit = (
     declaration: TaskGroup<readonly GroupMember[]>,
