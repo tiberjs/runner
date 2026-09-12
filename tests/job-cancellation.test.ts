@@ -63,6 +63,19 @@ test("children add no abort listeners to their parent and receive its cancellati
   await owner.close(reason);
 });
 
+test("cancelling a deep ownership chain does not depend on the JavaScript call stack", () => {
+  const reason = new Error("cancel deep tree");
+  const suspended = new Promise<never>(() => undefined);
+  const root = new Job(() => suspended).start();
+  let leaf = root;
+  for (let depth = 0; depth < 8_000; depth++) {
+    leaf = new Job(() => suspended).start({ parent: leaf });
+  }
+
+  expect(() => root.cancel(reason)).not.toThrow();
+  expect(leaf.signal.reason).toBe(reason);
+});
+
 test("reentrant external cancellation never starts or leaks an admitted Job", async () => {
   const source = new AbortController();
   const reason = new Error("cancel while linking");

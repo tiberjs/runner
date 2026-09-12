@@ -294,12 +294,19 @@ export class Job<T, Published = T> implements PromiseLike<T>, AsyncDisposable {
   }
 
   cancel(reason?: unknown): void {
-    if (this.phase === "closed") {
-      return;
-    }
-    this.controller.abort(reason);
-    for (const child of this.children ?? []) {
-      child.cancel(this.signal.reason);
+    const jobs: Job<unknown, unknown>[] = [this];
+    const reasons: unknown[] = [reason];
+    while (jobs.length > 0) {
+      const job = jobs.pop()!;
+      const received = reasons.pop();
+      if (job.phase === "closed") {
+        continue;
+      }
+      job.controller.abort(received);
+      for (const child of job.children ?? []) {
+        jobs.push(child);
+        reasons.push(job.signal.reason);
+      }
     }
   }
 
