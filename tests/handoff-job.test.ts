@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { expect, test } from "vitest";
 import {
@@ -148,6 +149,73 @@ test("an abandoned consumer cannot keep a closing Job suspended", async () => {
 
   await job.close();
   expect(job.state).toBe("closed");
+});
+
+test("an offer consults an external source that already aborted and rejects without subscribing", async () => {
+  const source = new AbortController();
+  const reason = new Error("gone before the offer");
+  let released: unknown;
+  const job = new HandoffJob<void, string, string>(
+    async (handoff) => {
+      source.abort(reason);
+      try {
+        await handoff.offer("value");
+      } catch (error) {
+        released = error;
+      }
+    },
+    { signal: source.signal },
+  ).start();
+
+  expect(await job.receive()).toBe("value");
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(released).toBe(reason);
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+});
+
+test("an unobserved external abort during suspension reaches the body only through the consumer's resume", async () => {
+  const source = new AbortController();
+  const reason = new Error("aborted while suspended");
+  let resumed: string | undefined;
+  const job = new HandoffJob<void, string, string>(
+    async (handoff) => {
+      resumed = await handoff.offer("value");
+    },
+    { signal: source.signal },
+  ).start();
+
+  expect(await job.receive()).toBe("value");
+  source.abort(reason);
+  await nextTurn();
+  expect(job.state).toBe("running");
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+
+  job.resume("delivered");
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(resumed).toBe("delivered");
+});
+
+test("a body that observed its signal before offering is released by a later external abort", async () => {
+  const source = new AbortController();
+  const reason = new Error("aborted while suspended");
+  let released: unknown;
+  const job = new HandoffJob<void, string, string>(
+    async (handoff) => {
+      signal();
+      try {
+        await handoff.offer("value");
+      } catch (error) {
+        released = error;
+      }
+    },
+    { signal: source.signal },
+  ).start();
+
+  expect(await job.receive()).toBe("value");
+  source.abort(reason);
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(released).toBe(reason);
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
 });
 
 test("owner cancellation cascades into a supervised HandoffJob's suspended offer", async () => {

@@ -76,11 +76,11 @@ test("cancelling a deep ownership chain does not depend on the JavaScript call s
   expect(leaf.signal.reason).toBe(reason);
 });
 
-test("reentrant external cancellation never starts or leaks an admitted Job", async () => {
+test("reentrant external cancellation during the first observation is visible before the observer continues", async () => {
   const source = new AbortController();
   const reason = new Error("cancel while linking");
   const add = source.signal.addEventListener.bind(source.signal);
-  let ran = false;
+  let observed: boolean | undefined;
   const registration = vi.spyOn(source.signal, "addEventListener").mockImplementation((...args) => {
     source.abort(reason);
     add(...args);
@@ -88,12 +88,12 @@ test("reentrant external cancellation never starts or leaks an admitted Job", as
   try {
     const job = new Job(
       () => {
-        ran = true;
+        observed = signal().aborted;
       },
       { signal: source.signal },
     ).start();
     await expect(job.join()).rejects.toBe(reason);
-    expect(ran).toBe(false);
+    expect(observed).toBe(true);
     expect(getEventListeners(source.signal, "abort")).toEqual([]);
   } finally {
     registration.mockRestore();
@@ -116,7 +116,13 @@ test("one external source shared by context and seed has one subscription", asyn
   const source = new AbortController();
   const release = Promise.withResolvers<void>();
   const reason = new Error("shared source");
-  const job = new Job(() => release.promise, { signal: source.signal }).start({
+  const job = new Job(
+    () => {
+      signal();
+      return release.promise;
+    },
+    { signal: source.signal },
+  ).start({
     context: {
       values: ContextFrame.empty,
       signal: source.signal,
@@ -128,6 +134,64 @@ test("one external source shared by context and seed has one subscription", asyn
   source.abort(reason);
   release.resolve();
   expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+});
+
+test("an unobserved external source is never subscribed to, yet its abort still ends the Job", async () => {
+  const source = new AbortController();
+  const release = Promise.withResolvers<void>();
+  const reason = new Error("nobody looked");
+  const job = new Job(() => release.promise, { signal: source.signal }).start();
+  await nextTurn();
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+
+  source.abort(reason);
+  release.resolve();
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+});
+
+test("the first signal read subscribes once and a late reader sees an abort that preceded it", async () => {
+  const source = new AbortController();
+  const release = Promise.withResolvers<void>();
+  const reason = new Error("aborted before observation");
+  let seen: AbortSignal | undefined;
+  const job = new Job(
+    async () => {
+      await release.promise;
+      seen = signal();
+      seen.throwIfAborted();
+    },
+    { signal: source.signal },
+  ).start();
+  source.abort(reason);
+  expect(getEventListeners(source.signal, "abort")).toEqual([]);
+
+  release.resolve();
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(seen?.aborted).toBe(true);
+  expect(seen?.reason).toBe(reason);
+});
+
+test("starting a child subscribes the parent so the cascade can reach it", async () => {
+  const source = new AbortController();
+  const reason = new Error("cancel the tree");
+  let childStopped = false;
+  const job = new Job(
+    () => {
+      expect(getEventListeners(source.signal, "abort")).toEqual([]);
+      fork(async () => {
+        await untilAbort();
+        childStopped = true;
+      });
+      expect(getEventListeners(source.signal, "abort")).toHaveLength(1);
+    },
+    { signal: source.signal },
+  ).start();
+
+  source.abort(reason);
+  expect(await job.result()).toEqual({ ok: false, error: reason });
+  expect(childStopped).toBe(true);
   expect(getEventListeners(source.signal, "abort")).toEqual([]);
 });
 

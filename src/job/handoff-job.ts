@@ -15,6 +15,7 @@ export class HandoffJob<Result, Offered, Resumed> extends Job<Result> {
     }
     const rendezvous = new HandoffState<Offered, Resumed>();
     super(() => body(rendezvous), seed);
+    rendezvous.owner = this;
     this.rendezvous = rendezvous;
     this.attach(rendezvous);
   }

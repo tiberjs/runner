@@ -35,12 +35,18 @@ export function withContext<T>(entries: readonly ContextEntry[], handler: () => 
   if (entries.length === 0) {
     return handler();
   }
+  const { context } = state;
   return runWith(
     {
-      ...state,
+      job: state.job,
       context: {
-        ...state.context,
-        values: state.context.values.withEntries(entries),
+        values: context.values.withEntries(entries),
+        // Forwarded, not copied: reading the signal stays the Job's observation point.
+        get signal() {
+          return context.signal;
+        },
+        deadline: context.deadline,
+        attachment: context.attachment,
       },
     },
     handler,
