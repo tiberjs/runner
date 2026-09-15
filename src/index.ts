@@ -25,6 +25,9 @@ export {
 
 export { Job } from "./job/job.js";
 export type { JobStartOptions, JobState, JobResult } from "./job/job.js";
+export { FlexJob } from "./job/flex-job.js";
+export type { FlexJobOptions, Publish, ReceiveOptions } from "./job/flex-job.js";
+export type { OverflowPolicy } from "./job/channel.js";
 export { HandoffJob } from "./job/handoff-job.js";
 export type { Handoff } from "./job/handoff.js";
 export { TaskGroup } from "./supervisor/task-group.js";

@@ -245,7 +245,76 @@ const result = await supervisor.run(plan);
 - Completion joins every member and descendant, including cancelled finalizers. A failed group rejects with its genuine failure, or an `AggregateError` for independent ones.
 - Leaves capture no ambient environment: each uses its own seed over the owner's context.
 
-## HandoffJob
+## FlexJob
+
+A `FlexJob<Result, Update>` is an ordinary Job whose body can publish intermediate values through a bounded channel. `publish(value)` is synchronous: it delivers to a waiting receiver or stores the value, then the body continues without waiting for consumption or an acknowledgement. `await job` and `job.result()` retain the ordinary Job contract and wait for the body, descendants, and finalizers.
+
+```ts
+import { FlexJob } from "@tiberjs/runner";
+
+type Update = { phase: "started" | "processed" };
+
+const job = new FlexJob<string, Update>(async (publish) => {
+  publish({ phase: "started" });
+  await doWork();
+  publish({ phase: "processed" });
+  return "finished";
+});
+
+job.start();
+const update = await job.receive(); // { done: false, value: Update }, or channel completion
+const result = await job.result(); // { ok: true, value: "finished" }, or { ok: false, error }
+```
+
+### Buffering and overflow
+
+The default capacity is **one**, with `overflow: "drop-oldest"`: an unread value is replaced by the latest publication. A publication stays available even if no receiver was waiting when it was sent. Unlike a Promise, each value is consumed once and the channel can deliver subsequent values. This is useful for latest-state observations; it does not preserve every event.
+
+Use `FlexJob.withBuffer(capacity, body, options?)` to retain multiple unread values in FIFO order. Overflow behavior is explicit configuration:
+
+```ts
+const job = FlexJob.withBuffer<string, Update>(
+  10,
+  async (publish) => {
+    publish({ phase: "started" });
+    await doWork();
+    publish({ phase: "processed" });
+    return "finished";
+  },
+  { overflow: "drop-oldest" },
+);
+```
+
+| `overflow`                | When the buffer is full                                              |
+| ------------------------- | -------------------------------------------------------------------- |
+| `"drop-oldest"` (default) | Remove the oldest unread value and retain the new one                |
+| `"drop-newest"`           | Discard the new value and retain existing unread values              |
+| `"error"`                 | Throw `RangeError` from `publish()`; an uncaught error fails the Job |
+
+Capacity must be an integer from 1 through 4294967295. Buffer storage grows as values are published, rather than preallocating the entire capacity. None of the policies waits for a receiver. If every event matters, choose adequate capacity and `"error"` so overflow is reported rather than silently dropping events.
+
+`new FlexJob(body, options?)` also accepts `{ capacity, overflow, seed }`. `withBuffer()` takes the same options except `capacity`, which is its first argument. `seed` is an ordinary `ExecutionSeed`; start, ownership, context, failure propagation, and Supervisor submission follow `Job` rules.
+
+### Receiving, completion, and cancellation
+
+- `receive({ signal? })` returns `{ done: false, value }` for an update or `{ done: true, value: undefined }` after successful channel completion. An update may itself be `undefined`; use `done` to distinguish it from completion.
+- Each update goes to **one** receiver. Concurrent receives consume successive values in request order; this is a queue, not broadcast or replay for each subscriber. A receive can be registered before the cold Job starts, but never starts the Job itself.
+- Aborting a receive's signal rejects only that receive with its reason and removes its cancellation listener. It does not cancel the Job, discard a queued value, or stop other receivers. An already-aborted signal rejects without consuming a value.
+- Returning from the body closes publication and preserves buffered values for draining. Once drained, receives report channel completion. Captured `publish` callbacks cannot publish after the body ends, including from descendants that outlive the body.
+- A body failure or Job cancellation discards buffered progress and rejects pending receives. Cancellation stays connected from construction until the whole Job settles, including before start and while descendants outlive the body. Receivers are released even while uncooperative work has not stopped; the Job still waits for its actual lifetime.
+- Channel completion is not proof of whole-Job success. Descendants can still fail after the body returns. Always observe `job.result()` or `await job` for the final outcome and composed failures. Later receives reflect a failed final outcome; an earlier receive cannot be revised.
+- A Job cannot receive from itself or an ancestor; that throws `LifecycleDependencyError` synchronously.
+
+To bound an observation without terminating the producer, pass a separate observation signal to `receive()`:
+
+```ts
+const update = await job.receive({ signal: AbortSignal.timeout(5_000) });
+// If this receive times out, the Job keeps running and publishing under its existing owner.
+```
+
+## HandoffJob (deprecated)
+
+`HandoffJob` and `Handoff` are deprecated. Prefer FlexJob for intermediate publications. Existing handoffs retain their one-shot, two-way behavior; FlexJob does not provide `resume()` responses or suspend publication until an acknowledgement. Applications migrating an acknowledgement-dependent handoff must explicitly keep that exchange in their body rather than simply replacing `offer()` with `publish()`.
 
 Sometimes a Job must hand a value to someone else _before_ it is done — an HTTP exchange publishes its response, then keeps owning cleanup until delivery is acknowledged. `HandoffJob` models that as a one-shot, two-way rendezvous inside an ordinary Job lifetime.
 
@@ -272,12 +341,13 @@ await exchange; // body and descendants have settled
 
 ## API summary
 
-| Export                                                                                    | Role                                                                           |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `Job`, `HandoffJob`                                                                       | An execution and its lifetime; the handoff variant offers one value mid-flight |
-| `execute`, `fork`, `timeout`                                                              | Start a child: awaited boundary, background child, deadline-bounded boundary   |
-| `Supervisor`, `TaskGroup`                                                                 | Submit work to a supplied owner; declare nested groups of cold Jobs            |
-| `signal`, `deadline`, `use`, `hasContext`, `requireContext`, `withContext`                | Ambient environment of the running Job                                         |
-| `contextKey`, `provide`, `ContextFrame`                                                   | Typed context bindings                                                         |
-| `currentState`, `currentAttachment`, `peekState`, `runWith`                               | Runtime state access for integrations                                          |
-| `combinedError`, `LifecycleStateError`, `LifecycleDependencyError`, `MissingContextError` | Errors                                                                         |
+| Export                                                                                    | Role                                                                              |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `Job`, `FlexJob`                                                                          | An execution and its lifetime; FlexJob also publishes bounded intermediate values |
+| `HandoffJob`, `Handoff`                                                                   | Deprecated one-shot, two-way handoff                                              |
+| `execute`, `fork`, `timeout`                                                              | Start a child: awaited boundary, background child, deadline-bounded boundary      |
+| `Supervisor`, `TaskGroup`                                                                 | Submit work to a supplied owner; declare nested groups of cold Jobs               |
+| `signal`, `deadline`, `use`, `hasContext`, `requireContext`, `withContext`                | Ambient environment of the running Job                                            |
+| `contextKey`, `provide`, `ContextFrame`                                                   | Typed context bindings                                                            |
+| `currentState`, `currentAttachment`, `peekState`, `runWith`                               | Runtime state access for integrations                                             |
+| `combinedError`, `LifecycleStateError`, `LifecycleDependencyError`, `MissingContextError` | Errors                                                                            |

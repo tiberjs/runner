@@ -16,7 +16,9 @@ Runner must not import server, HTTP, WebSocket, gRPC, broker, scheduler, or opti
 ## Public contracts
 
 - `Job` is a cold, single-use execution and awaitable lifetime node. It settles only after its body and actual descendants finish.
+- `FlexJob` is a Job with synchronous intermediate publication into a bounded single-delivery channel. Its default buffer retains the latest value; overflow is explicit configuration. Receivers never control producer progress, and cancelling a receive never cancels the Job. Body completion closes publication; final results still join all descendants. Cancellation stays linked until the Job settles, including before start and while descendants drain. The channel owns no Job lifetime or cancellation source.
 - `HandoffJob` is a Job whose body offers one value and suspends until resumed. The handoff is rendezvous state released by the Job's cancellation and closure; it owns no lifetime, signal, or queue.
+- `HandoffJob` and `Handoff` are deprecated but retain their existing one-shot, two-way behavior until removal. Do not turn them into FlexJob compatibility wrappers.
 - `Supervisor` manages a supplied ordinary Job. It does not create hidden startup, background, or shutdown owners.
 - `Supervisor.start(options)` follows `Job.start(options)` ownership and context rules. Use `{ parent: undefined }` to explicitly select an independent root; Supervisor state is its Job state.
 - Applications own initialization order and error reporting. Do not add readiness handshakes, automatic logging, or reporting callbacks to the execution core.
