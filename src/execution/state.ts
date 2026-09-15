@@ -21,6 +21,7 @@ export function withoutExecution<T>(fn: () => T): T {
   return storage.exit(fn);
 }
 
+/** Return the active execution state, throwing Error when there is no active execution. */
 export function currentState(): RuntimeState {
   const state = storage.getStore();
   if (!state) {
@@ -32,6 +33,7 @@ export function currentState(): RuntimeState {
   return state;
 }
 
+/** Return the active execution state, or undefined outside an execution. */
 export function peekState(): RuntimeState | undefined {
   return storage.getStore();
 }

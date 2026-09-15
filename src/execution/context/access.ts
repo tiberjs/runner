@@ -9,17 +9,17 @@ export class MissingContextError extends Error {
   }
 }
 
-/** Return the value bound to `key` in the current execution, if present. */
+/** Return the binding or undefined when absent. Throws Error outside an active execution. */
 export function use<T>(key: ContextKey<T>): T | undefined {
   return currentState().context.values.get(key.id) as T | undefined;
 }
 
-/** Whether the active frame binds `key`, including an explicit undefined value. */
+/** Whether the frame binds `key`, including undefined. Throws Error outside an active execution. */
 export function hasContext<T>(key: ContextKey<T>): boolean {
   return currentState().context.values.has(key.id);
 }
 
-/** Return a required binding, throwing only when the key is absent. */
+/** Return the binding; throws MissingContextError when absent, or Error outside an execution. */
 export function requireContext<T>(key: ContextKey<T>): T {
   const values = currentState().context.values;
   const value = values.get(key.id) as T | undefined;
@@ -53,12 +53,12 @@ export function withContext<T>(entries: readonly ContextEntry[], handler: () => 
   );
 }
 
-/** The currently executing Job's cancellation signal. */
+/** The current Job's cancellation signal. Throws Error outside an active execution. */
 export function signal(): AbortSignal {
   return currentState().context.signal;
 }
 
-/** The current execution's deadline (epoch millis), if any. */
+/** The deadline (epoch millis), if any. Throws Error outside an active execution. */
 export function deadline(): number | undefined {
   return currentState().context.deadline;
 }

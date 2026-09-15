@@ -9,6 +9,7 @@ export interface ContextKey<T> {
 /** A context binding used to derive a downstream execution. */
 export type ContextEntry = readonly [ContextKey<unknown>, unknown];
 
+/** Create a fresh Symbol identity; equal descriptions do not make keys interchangeable. */
 export function contextKey<T>(description: string): ContextKey<T> {
   return Object.freeze({ id: Symbol(description), description });
 }
