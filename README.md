@@ -79,7 +79,7 @@ Use native `try/finally`, `using`, or `await using` for resources. Body-local cl
 
 ## Cancellation and deadlines
 
-`signal()` returns the current Job's `AbortSignal`. Pass it to cancellable native APIs and check it after awaits and before irreversible work. Runner cannot force uncooperative code to stop.
+`signal()` returns the current Job's `AbortSignal` and throws a plain `Error` outside an active execution. Pass it to cancellable native APIs and check it after awaits and before irreversible work. Runner cannot force uncooperative code to stop.
 
 ```ts
 import { setTimeout } from "node:timers/promises";
@@ -95,6 +95,49 @@ await execute(async () => {
 - `timeout(ms, body)` creates a child boundary that owns its timer through the completion of the entire subtree, not merely the body. Its promise settles only after cancelled descendants and finalizers finish.
 - A Job seeded with an external `signal` follows it: an abort before the body runs cancels the Job without running it; an abort during the body yields a cancelled result. The subscription itself is made lazily, the first time the Job's cancellation is observed — a `signal()` read or a child start — so a Job nobody observes registers no listener.
 - Cancellation classification is strict. A rejection that _is_ the signal reason, or Node's `AbortError` with `code: "ABORT_ERR"` and that reason as `cause`, is expected cancellation. An application error is not cancellation merely because its `cause` references the reason.
+
+### Stop waiting without stopping the work
+
+`timeout()` limits the lifetime of its owned subtree. It is not a bound on how long a caller waits for independently owned work: cancellation is cooperative, and joining cancelled work can take longer than the deadline.
+
+For external process handles, keep their lifetime under a longer-lived application owner and race their settlement promises against an observation timer. Pass cancellation to the observation timer, not to the processes. A process's domain settlement (for example, producing a result) can precede its exit and its owning Job's completion.
+
+```ts
+import { addAbortListener } from "node:events";
+import { setTimeout as sleep } from "node:timers/promises";
+import { peekState } from "@tiberjs/runner";
+
+async function waitForFirst<T>(settlements: readonly Promise<T>[], ms: number) {
+  if (settlements.length === 0) throw new RangeError("At least one settlement is required.");
+  const observation = peekState()?.context.signal;
+  observation?.throwIfAborted();
+  const timer = new AbortController();
+  using registration = observation
+    ? addAbortListener(observation, () => timer.abort(observation.reason))
+    : undefined;
+
+  try {
+    return await Promise.race([
+      ...settlements.map((settlement) =>
+        settlement.then((value) => ({ kind: "settled" as const, value })),
+      ),
+      sleep(ms, undefined, { signal: timer.signal }).then(() => ({ kind: "elapsed" as const })),
+    ]);
+  } finally {
+    timer.abort(); // Clear a losing timer; the observation registration is disposed on scope exit.
+  }
+}
+
+// Workers expose settlement promises; this wait does not own or terminate them.
+const outcome = await waitForFirst(
+  workers.map((worker) => worker.settled),
+  5_000,
+);
+```
+
+After an early settlement, timeout, or aborted observation, the application owner still owns every process's shutdown and cleanup. If an adapter creates temporary process-event listeners to build settlement observations, dispose those registrations in the same `finally` scope; `Promise.race()` does not remove them or cancel losing operations. Install observers before processes can publish their settlement, and keep exit/failure reporting with the owner even after a caller stops observing.
+
+Use one Job per process when it manages the process's actual lifetime. A separate settlement promise can report a milestone while that Job stays alive. `HandoffJob` is appropriate when one published value must wait for a consumer's response; it is a single exchange, not a recurring notification stream.
 
 ## Context
 
@@ -124,11 +167,23 @@ await execute({ values: [provide(Tenant, "outer")] }, async () => {
 });
 ```
 
-- `use(key)` returns the binding or `undefined`. `hasContext(key)` distinguishes absence from an explicit `undefined`. `requireContext(key)` throws `MissingContextError` when absent.
+- Inside an active execution, `use(key)` returns the binding or `undefined`. `hasContext(key)` distinguishes absence from an explicit `undefined`. `requireContext(key)` throws `MissingContextError` when absent. Outside an active execution, all three throw a plain `Error`; `undefined` from `use()` does not mean there is no execution.
 - Bound values are stored by reference; they are not cloned or frozen.
 - A **seed** (`ExecutionSeed`) is what a Job is started with: `values` (entries to overlay, or a `ContextFrame` to replace inherited values), an `attachment`, an external `signal`, and an absolute `deadline`. Omitted fields inherit. An explicit `attachment`, including `undefined`, replaces the inherited one.
 - `currentState()` exposes `{ job, context }` for the active call chain; `context` carries `values`, the Job's `signal`, the `deadline`, and the `attachment`. `currentAttachment()` reads the attachment directly. `job.context` is available after activation and is not a cursor for later `withContext()` calls.
 - `ContextFrame.from(entries)` builds an independent frame; `frame.withEntries(entries)` derives one.
+
+`signal()`, `deadline()`, `currentState()`, `currentAttachment()`, and `withContext()` also require an active execution. Integrations that intentionally work both inside and outside Jobs can use `peekState()`, which returns `undefined` outside an execution. For example, `peekState()?.context.signal` safely obtains an optional cancellation signal.
+
+### Key identity and duplicate module loading
+
+Bindings are indexed by `key.id`, a fresh `Symbol` created by each `contextKey()` call. The description is diagnostic text, not a lookup name: two keys described as `"config"` are different, even if their generic types match. Import the same exported key wherever it is provided or read.
+
+Loading a key-definition module twice creates different symbols. This can happen when a test runner's transformed module graph and Node's native imports each evaluate the module, or when consumers mix package imports and source paths. A value bound using one copy will be absent when read using the other. Keep providers and consumers on the same module graph and package entry point. Description-based fallback is intentionally unsupported because unrelated bindings can share a description and have incompatible types.
+
+Loading runner itself twice is a separate problem: each copy creates its own `AsyncLocalStorage`, so its ambient APIs do not see the other copy's execution state. Sharing key symbols alone cannot fix that; use one runtime instance. Any application-defined `Symbol.for()` keys require a shared, namespaced contract (including a version when types change), and only share identity within the same symbol registry.
+
+When an injected adapter or test binding is required, read it with `requireContext()` rather than silently choosing a side-effecting default when it is absent. This makes missing bindings fail before an unexpected adapter creates files or accesses external resources.
 
 ## Supervisor
 
