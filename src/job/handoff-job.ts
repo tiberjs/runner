@@ -2,7 +2,10 @@ import type { ExecutionSeed } from "../execution/context/execution-context.js";
 import { HandoffState, type Handoff } from "./handoff.js";
 import { Job } from "./job.js";
 
-/** A Job whose body offers one value mid-execution and suspends until the consumer resumes it. */
+/**
+ * A Job whose body offers one value mid-execution and suspends until the consumer resumes it.
+ * @deprecated Use FlexJob for intermediate publications. FlexJob does not wait for a resume response.
+ */
 export class HandoffJob<Result, Offered, Resumed> extends Job<Result> {
   private readonly rendezvous: HandoffState<Offered, Resumed>;
 

@@ -1,3 +1,4 @@
+/** @deprecated Use FlexJob's Publish for intermediate values; it does not provide resume responses. */
 export interface Handoff<Offered, Resumed> {
   /** Hand over one value and suspend until resumed. Rejects with the Job's cancellation reason. */
   offer(value: Offered): Promise<Resumed>;
