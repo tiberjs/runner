@@ -14,8 +14,7 @@ export class Channel<T> {
   private head = 0;
   private size = 0;
   private receivers: Set<Receiver<T>> | undefined;
-  private closed = false;
-  private failed = false;
+  private state: "open" | "closed" | "failed" = "open";
   private error: unknown;
 
   constructor(
@@ -32,7 +31,7 @@ export class Channel<T> {
   }
 
   publish(value: T): void {
-    if (this.closed) {
+    if (this.state !== "open") {
       throw new TypeError("Cannot publish to a closed channel.");
     }
 
@@ -65,7 +64,7 @@ export class Channel<T> {
     if (signal?.aborted) {
       return Promise.reject(signal.reason);
     }
-    if (this.failed) {
+    if (this.state === "failed") {
       return Promise.reject(this.error);
     }
 
@@ -76,7 +75,7 @@ export class Channel<T> {
       this.size--;
       return Promise.resolve({ done: false, value });
     }
-    if (this.closed) {
+    if (this.state === "closed") {
       return Promise.resolve({ done: true, value: undefined });
     }
 
@@ -97,11 +96,11 @@ export class Channel<T> {
 
   /** Stop publication; successful completion preserves values not yet received. */
   close(): void {
-    if (this.closed) {
+    if (this.state !== "open") {
       return;
     }
 
-    this.closed = true;
+    this.state = "closed";
     for (const receiver of this.receivers ?? []) {
       receiver.registration?.[Symbol.dispose]();
       receiver.resolve({ done: true, value: undefined });
@@ -111,8 +110,7 @@ export class Channel<T> {
 
   /** Failure discards stale progress and releases all receivers, including late ones. */
   fail(error: unknown): void {
-    this.closed = true;
-    this.failed = true;
+    this.state = "failed";
     this.error = error;
 
     this.values.length = 0;

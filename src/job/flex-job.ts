@@ -33,8 +33,16 @@ export class FlexJob<Result, Update> extends Job<Result> {
     super(() => this.runBody(body), options.seed);
     this.channel = channel;
 
-    // Preparation failure and cold close can settle a Job without ever running its body.
+    // Cancellation must reach the channel before start and while descendants outlive the body.
+    const signal = this.signal;
+    const registration = addAbortListener(signal, () => {
+      channel.fail(this.failed ? this.failure : signal.reason);
+    });
+
+    // Preparation and descendant failures can settle a Job without an active publication body.
     void super.result().then((result) => {
+      registration[Symbol.dispose]();
+
       if (result.ok) {
         channel.close();
       } else {
@@ -44,11 +52,8 @@ export class FlexJob<Result, Update> extends Job<Result> {
   }
 
   private async runBody(body: FlexBody<Result, Update>): Promise<Result> {
-    // Observing cancellation releases receivers even if the body itself ignores its signal.
+    // Activation may have added external sources since the constructor observed this signal.
     const signal = this.signal;
-    using _registration = addAbortListener(signal, () => {
-      this.channel.fail(this.failed ? this.failure : signal.reason);
-    });
 
     const publish: Publish<Update> = (value) => {
       this.recheckCancellation();

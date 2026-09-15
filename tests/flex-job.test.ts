@@ -20,6 +20,7 @@ test("construction is cold and publication never waits for a receiver", async ()
   const job = new FlexJob<string, number>((publish) => {
     ran = true;
 
+    expectTypeOf(publish).toEqualTypeOf<Publish<number>>();
     expect(publish(1)).toBeUndefined();
     publish(2);
     publish(3);
@@ -34,7 +35,7 @@ test("construction is cold and publication never waits for a receiver", async ()
   expect(await job.receive()).toEqual({ done: false, value: 3 });
   expect(await job.receive()).toEqual({ done: true, value: undefined });
   expect(await job.result()).toEqual({ ok: true, value: "done" });
-  expectTypeOf(job.result()).toEqualTypeOf<ReturnType<Job<string>["result"]>>();
+  expectTypeOf(job.receive).returns.toEqualTypeOf<Promise<IteratorResult<number, void>>>();
 });
 
 test("a pending receive takes an undefined publication without confusing it with completion", async () => {
@@ -153,18 +154,21 @@ test("overflow errors fail the Job unless the body handles them", async () => {
   expect(await recovered.receive()).toEqual({ done: false, value: 1 });
 });
 
-test("invalid buffer configuration is rejected before executing the body", () => {
-  let ran = false;
-  const body = () => {
-    ran = true;
-  };
+test("buffer configuration is validated at construction", async () => {
+  const body = (publish: Publish<number>) => publish(42);
+
+  for (const capacity of [1, 0xffff_ffff]) {
+    const job = FlexJob.withBuffer(capacity, body).start();
+    await job;
+    expect(await job.receive()).toEqual({ done: false, value: 42 });
+    expect(await job.receive()).toEqual({ done: true, value: undefined });
+  }
 
   for (const capacity of [0, -1, 1.5, NaN, Infinity, 2 ** 32]) {
     expect(() => FlexJob.withBuffer(capacity, body)).toThrowError(RangeError);
   }
   expect(() => new FlexJob(body, { overflow: "unknown" as "error" })).toThrowError(TypeError);
   expect(() => new FlexJob(undefined as unknown as () => void)).toThrowError(TypeError);
-  expect(ran).toBe(false);
 });
 
 test("aborting one receive keeps the producer and other receivers running", async () => {
@@ -257,13 +261,20 @@ test("body completion closes publication but final results still join descendant
     return value;
   });
 
-  expect(await job.receive()).toEqual({ done: false, value: 42 });
-  expect(await job.receive()).toEqual({ done: true, value: undefined });
-  expect(settled).toBe(false);
-  expect(() => publishLater!(43)).toThrowError(TypeError);
+  try {
+    expect(await job.receive()).toEqual({ done: false, value: 42 });
+    expect(await job.receive()).toEqual({ done: true, value: undefined });
 
-  releaseChild.resolve();
+    await nextTurn();
+    expect(settled).toBe(false);
+    expect(() => publishLater!(43)).toThrowError(TypeError);
+  } finally {
+    releaseChild.resolve();
+    await job.result();
+  }
+
   expect(await completion).toBe("done");
+  expect(getEventListeners(job.signal, "abort")).toHaveLength(0);
 });
 
 test("body failures preserve error identity and discard stale updates", async () => {
@@ -309,6 +320,63 @@ test("cancellation releases receivers before uncooperative work finishes", async
   await expect(job.receive()).rejects.toBe(reason);
 });
 
+test.each(["direct", "external", "parent"] as const)(
+  "%s cancellation after body return discards progress before descendants finish",
+  async (source) => {
+    const releaseParent = Promise.withResolvers<void>();
+    const releaseChild = Promise.withResolvers<void>();
+    const external = new AbortController();
+    const reason = new Error("stop");
+    let settled = false;
+
+    const parent = new Job(() => releaseParent.promise).start({ parent: undefined });
+    const job = FlexJob.withBuffer<string, number>(
+      2,
+      (publish) => {
+        fork(() => releaseChild.promise);
+        publish(1);
+        publish(2);
+        return "body returned";
+      },
+      { seed: { signal: external.signal } },
+    ).start({ parent });
+    const completion = job.result().then((result) => {
+      settled = true;
+      return result;
+    });
+
+    try {
+      await nextTurn();
+      expect(job.state).toBe("closing");
+
+      switch (source) {
+        case "direct":
+          job.cancel(reason);
+          break;
+        case "external":
+          external.abort(reason);
+          break;
+        case "parent":
+          parent.cancel(reason);
+          break;
+      }
+
+      await nextTurn();
+      expect(settled).toBe(false);
+      await expect(job.receive()).rejects.toBe(reason);
+      await expect(job.receive()).rejects.toBe(reason);
+    } finally {
+      releaseChild.resolve();
+      releaseParent.resolve();
+      await Promise.all([completion, parent.result()]);
+    }
+
+    expect(await completion).toEqual({ ok: false, error: reason });
+    expect(getEventListeners(job.signal, "abort")).toHaveLength(0);
+    expect(getEventListeners(external.signal, "abort")).toHaveLength(0);
+  },
+);
+
 test("parent cancellation reaches a FlexJob channel without cancelling a receive separately", async () => {
   const release = Promise.withResolvers<void>();
   const ready = Promise.withResolvers<{ child: FlexJob<void, number> }>();
@@ -347,6 +415,35 @@ test("an external source is observed even when the body does not read its signal
   release.resolve();
   expect(await job.result()).toEqual({ ok: false, error: reason });
   expect(getEventListeners(external.signal, "abort")).toHaveLength(0);
+});
+
+test("cold cancellation releases receivers without starting or closing the Job", async () => {
+  const reason = new Error("stopped before start");
+  let ran = false;
+  let rejected = false;
+  let rejection: unknown;
+
+  const job = new FlexJob<void, number>(() => {
+    ran = true;
+  });
+  const received = job.receive().catch((error: unknown) => {
+    rejected = true;
+    rejection = error;
+  });
+
+  try {
+    job.cancel(reason);
+    await nextTurn();
+    expect(rejected).toBe(true);
+    expect(rejection).toBe(reason);
+    expect(job.state).toBe("created");
+    expect(ran).toBe(false);
+  } finally {
+    await job.close(reason);
+    await received;
+  }
+
+  expect(getEventListeners(job.signal, "abort")).toHaveLength(0);
 });
 
 test("cold close and failures before the body starts release receivers", async () => {
@@ -430,57 +527,100 @@ test("receiving from oneself or an ancestor is rejected synchronously", async ()
   await job;
 });
 
-test("a descendant failure after publication closes remains in the final Job result", async () => {
-  const release = Promise.withResolvers<void>();
+test("a descendant failure discards unread progress before remaining descendants finish", async () => {
+  const failChild = Promise.withResolvers<void>();
+  const releaseSibling = Promise.withResolvers<void>();
   const failure = new Error("descendant failed");
+  let settled = false;
+
   const job = new FlexJob<string, number>((publish) => {
     fork(async () => {
-      await release.promise;
+      await failChild.promise;
       throw failure;
     });
+    fork(() => releaseSibling.promise);
     publish(42);
     return "body returned";
   }).start();
+  const completion = job.result().then((result) => {
+    settled = true;
+    return result;
+  });
 
-  expect(await job.receive()).toEqual({ done: false, value: 42 });
-  expect(await job.receive()).toEqual({ done: true, value: undefined });
+  try {
+    await nextTurn();
+    expect(job.state).toBe("closing");
 
-  release.resolve();
-  expect(await job.result()).toEqual({ ok: false, error: failure });
-  await expect(job.receive()).rejects.toBe(failure);
+    failChild.resolve();
+    await nextTurn();
+    expect(job.failed).toBe(true);
+    expect(settled).toBe(false);
+    await expect(job.receive()).rejects.toBe(failure);
+    await expect(job.receive()).rejects.toBe(failure);
+  } finally {
+    failChild.resolve();
+    releaseSibling.resolve();
+    await completion;
+  }
+
+  expect(await completion).toEqual({ ok: false, error: failure });
+  expect(getEventListeners(job.signal, "abort")).toHaveLength(0);
 });
 
-test("composed operation and finalizer failures remain in the final result", async () => {
-  const proceed = Promise.withResolvers<void>();
+test("body await-using cleanup failure joins an independent descendant failure", async () => {
+  const failChild = Promise.withResolvers<void>();
+  const cleanupStarted = Promise.withResolvers<void>();
+  const finishCleanup = Promise.withResolvers<void>();
   const operation = new Error("operation failed");
   const cleanup = new Error("cleanup failed");
+  let settled = false;
+
   const job = new FlexJob<void, number>(async (publish) => {
-    fork(async () => {
-      try {
-        await proceed.promise;
-        throw operation;
-      } finally {
-        fork(() => {
-          throw cleanup;
-        });
-      }
+    await using _resource = {
+      async [Symbol.asyncDispose]() {
+        cleanupStarted.resolve();
+        await finishCleanup.promise;
+        throw cleanup;
+      },
+    };
+
+    const child = fork(async () => {
+      await failChild.promise;
+      throw operation;
     });
     publish(42);
+    await child.result();
   }).start();
+  const completion = job.result().then((result) => {
+    settled = true;
+    return result;
+  });
 
-  expect(await job.receive()).toEqual({ done: false, value: 42 });
+  try {
+    expect(await job.receive()).toEqual({ done: false, value: 42 });
 
-  proceed.resolve();
-  const result = await job.result();
+    failChild.resolve();
+    await cleanupStarted.promise;
+    await nextTurn();
+    expect(settled).toBe(false);
+    await expect(job.receive()).rejects.toBe(operation);
+  } finally {
+    failChild.resolve();
+    finishCleanup.resolve();
+    await completion;
+  }
+
+  const result = await completion;
   expect(result.ok).toBe(false);
   if (result.ok) {
     throw new Error("expected failure");
   }
 
   expect(result.error).toBeInstanceOf(AggregateError);
-  expect((result.error as AggregateError).errors).toEqual(
-    expect.arrayContaining([operation, cleanup]),
-  );
+  const errors = (result.error as AggregateError).errors;
+  expect(errors).toHaveLength(2);
+  expect(errors[0]).toBe(operation);
+  expect(errors[1]).toBe(cleanup);
   await expect(job.receive()).rejects.toBe(result.error);
 });
 
@@ -504,14 +644,6 @@ test("a deadline releases observation while completion still waits for work", as
   } finally {
     vi.useRealTimers();
   }
-});
-
-test("the maximum supported capacity accepts publications", async () => {
-  const job = FlexJob.withBuffer<void, number>(0xffff_ffff, (publish) => publish(42)).start();
-
-  await job;
-  expect(await job.receive()).toEqual({ done: false, value: 42 });
-  expect(await job.receive()).toEqual({ done: true, value: undefined });
 });
 
 test("isolated Supervisor submissions preserve FlexJob result and channel failure", async () => {
