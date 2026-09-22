@@ -1,6 +1,6 @@
 {
   "name": "@tiberjs/runner",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Job-based structured concurrency, supervision, declarative task groups, and immutable execution context.",
   "type": "module",
   "main": "./dist/index.js",
